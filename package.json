@@ -1,0 +1,14 @@
+{
+  "name": "sat-monitor",
+  "version": "1.0.0",
+  "description": "SAT 考位自动监控与代报抢位调度系统",
+  "main": "server.js",
+  "scripts": {
+    "start": "node start-local.js",
+    "test": "node --test test/local.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2",
+    "playwright": "^1.50.0"
+  }
+}

@@ -1,0 +1,1354 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>SAT 本机控制台</title>
+  <link rel="stylesheet" href="/vendor/pico.min.css">
+  <style>
+    :root {
+      --bg-dark: #0d1117;
+      --card-bg: #161b22;
+      --card-border: #30363d;
+      --text-main: #e6edf3;
+      --text-muted: #8b949e;
+      --accent-green: #238636;
+      --green-glow: #2ea043;
+      --accent-gold: #d29922;
+      --accent-red: #da3633;
+      --font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+    }
+
+    * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+    body {
+      background-color: var(--bg-dark);
+      color: var(--text-main);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+      padding-bottom: 90px;
+      min-height: 100vh;
+    }
+
+    /* 顶部导航 */
+    .top-header {
+      position: sticky;
+      top: 0;
+      z-index: 100;
+      background: rgba(13, 17, 23, 0.88);
+      backdrop-filter: blur(12px);
+      border-bottom: 1px solid var(--card-border);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .brand-title {
+      font-size: 16px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .pulse-dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background-color: var(--green-glow);
+      box-shadow: 0 0 8px var(--green-glow);
+      animation: pulse 2s infinite;
+    }
+    @keyframes pulse {
+      0% { opacity: 0.4; transform: scale(0.9); }
+      50% { opacity: 1; transform: scale(1.1); }
+      100% { opacity: 0.4; transform: scale(0.9); }
+    }
+
+    .operator-badge {
+      font-size: 13px;
+      background: #21262d;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      padding: 4px 10px;
+      border-radius: 20px;
+    }
+
+    /* 全局数据条 */
+    .metric-strip {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1px;
+      background: var(--card-border);
+      border-bottom: 1px solid var(--card-border);
+      margin-bottom: 16px;
+    }
+    .metric-item {
+      background: var(--card-bg);
+      padding: 12px 8px;
+      text-align: center;
+    }
+    .metric-num {
+      font-family: var(--font-mono);
+      font-size: 20px;
+      font-weight: 700;
+      color: var(--text-main);
+    }
+    .metric-label {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 2px;
+      text-transform: uppercase;
+    }
+
+    /* 容器 */
+    .container-box {
+      max-width: 600px;
+      margin: 0 auto;
+      padding: 0 16px;
+    }
+
+    /* 任务卡片 */
+    .task-card {
+      background: var(--card-bg);
+      border: 1px solid var(--card-border);
+      border-radius: 10px;
+      padding: 16px;
+      margin-bottom: 14px;
+      position: relative;
+      transition: all 0.2s ease;
+    }
+    .task-card.is-locked {
+      border: 1.5px solid var(--accent-gold);
+      background: #1c180e;
+      box-shadow: 0 0 16px rgba(210, 153, 34, 0.2);
+    }
+
+    .task-top {
+      display: flex;
+      justify-content: flex-end;
+      align-items: flex-start;
+      margin-bottom: 10px;
+    }
+
+    .status-badge {
+      font-size: 12px;
+      font-weight: 600;
+      padding: 3px 8px;
+      border-radius: 6px;
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+    }
+    .badge-running { background: rgba(35, 134, 54, 0.2); color: #3fb950; border: 1px solid #238636; }
+    .badge-idle { background: #21262d; color: var(--text-muted); border: 1px solid var(--card-border); }
+    .badge-locked { background: rgba(210, 153, 34, 0.25); color: #e3b341; border: 1px solid var(--accent-gold); animation: flash 1s infinite alternate; }
+    .badge-error { background: rgba(218, 54, 51, 0.2); color: #f85149; border: 1px solid var(--accent-red); }
+
+    @keyframes flash {
+      from { opacity: 0.8; }
+      to { opacity: 1; filter: brightness(1.2); }
+    }
+
+    .task-details {
+      margin: 16px 0;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+    .task-date { font-size: 18px; font-weight: 600; margin-bottom: 6px; }
+    .task-center { overflow-wrap: anywhere; }
+    .task-photo, .task-last-check { font-size: 12px; color: var(--text-muted); }
+    .task-photo { margin-top: 8px; }
+    .task-photo a { color: var(--text-main); }
+    .task-last-check { margin-top: 10px; font-variant-numeric: tabular-nums; }
+    .task-top > div:first-child { min-width: 0; overflow-wrap: anywhere; }
+    .task-top { gap: 12px; }
+    .status-badge { white-space: nowrap; }
+    .task-card [role="status"] { font-size: 14px; line-height: 1.5; overflow-wrap: anywhere; }
+
+    /* 锁位倒计时醒目框 */
+    .countdown-banner {
+      background: #281d09;
+      border: 1px solid var(--accent-gold);
+      color: #f0883e;
+      padding: 10px;
+      border-radius: 6px;
+      margin-bottom: 12px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-weight: 700;
+    }
+    .countdown-timer {
+      font-family: var(--font-mono);
+      font-size: 18px;
+      color: #e3b341;
+    }
+
+    .task-log-preview {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+      margin-bottom: 12px;
+    }
+    .task-log-preview.has-error {
+      color: #f85149;
+      background: rgba(218, 54, 51, 0.12);
+      border-left: 2px solid var(--accent-red);
+      font-weight: 500;
+    }
+
+    /* 卡片操作按钮行 */
+    .card-actions {
+      display: flex;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+    .card-actions .btn-act { flex: 0 0 auto; padding: 8px 12px; min-height: 44px; }
+    .card-actions .btn-secondary { background: transparent; border-color: transparent; }
+    .card-actions .btn-del { margin-left: auto; }
+    .card-actions .btn-act:focus-visible { outline: 2px solid var(--text-main); outline-offset: 2px; }
+    .btn-act {
+      flex: 1;
+      font-size: 13px;
+      padding: 8px 4px;
+      border-radius: 6px;
+      border: 1px solid var(--card-border);
+      background: #21262d;
+      color: var(--text-main);
+      cursor: pointer;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 4px;
+      text-decoration: none;
+      font-weight: 500;
+    }
+    .btn-del {
+      flex: 0 0 38px;
+    }
+    .btn-act:hover { background: #30363d; }
+    .btn-start { background: var(--accent-green); border-color: #2ea043; color: #fff; }
+    .btn-start:hover { background: #2ea043; }
+    .btn-stop { background: #21262d; border-color: #da3633; color: #f85149; }
+    .btn-del { color: #f85149; }
+
+    /* 底部悬浮录单大按钮 */
+    .bottom-bar {
+      position: fixed;
+      bottom: 0;
+      left: 0;
+      right: 0;
+      background: rgba(13, 17, 23, 0.94);
+      backdrop-filter: blur(12px);
+      border-top: 1px solid var(--card-border);
+      padding: 12px 16px;
+      display: flex;
+      justify-content: center;
+      z-index: 100;
+    }
+    .btn-primary-add {
+      width: 100%;
+      max-width: 600px;
+      background: var(--accent-green);
+      color: #fff;
+      font-size: 16px;
+      font-weight: 700;
+      padding: 12px 0;
+      border-radius: 8px;
+      border: none;
+      cursor: pointer;
+      box-shadow: 0 4px 14px rgba(35, 134, 54, 0.4);
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+    }
+
+    /* 底部抽屉 (Modal Bottom Sheet) */
+    .sheet-overlay {
+      position: fixed;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: rgba(0, 0, 0, 0.75);
+      z-index: 200;
+      display: none;
+      backdrop-filter: blur(4px);
+    }
+    .sheet-content {
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: #161b22;
+      border-top: 1px solid var(--card-border);
+      border-radius: 16px 16px 0 0;
+      padding: 20px 16px 34px 16px;
+      max-width: 600px;
+      margin: 0 auto;
+      max-height: 85vh;
+      overflow-y: auto;
+      z-index: 201;
+      display: none;
+    }
+    .sheet-title {
+      font-size: 18px;
+      font-weight: 700;
+      margin-bottom: 14px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .sheet-close {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      cursor: pointer;
+    }
+
+    /* 智能文本解析框 */
+    .smart-parse-box {
+      background: #0d1117;
+      border: 1px dashed #388bfd;
+      border-radius: 8px;
+      padding: 10px;
+      margin-bottom: 14px;
+    }
+    .smart-parse-title {
+      font-size: 12px;
+      color: #58a6ff;
+      font-weight: 600;
+      margin-bottom: 6px;
+    }
+    .smart-textarea {
+      width: 100%;
+      height: 60px;
+      background: #161b22;
+      border: 1px solid var(--card-border);
+      color: var(--text-main);
+      border-radius: 6px;
+      padding: 6px 8px;
+      font-size: 12px;
+      resize: none;
+      margin-bottom: 6px;
+    }
+    .btn-parse {
+      background: #1f6feb;
+      color: #fff;
+      border: none;
+      font-size: 12px;
+      font-weight: 600;
+      padding: 6px 12px;
+      border-radius: 4px;
+      cursor: pointer;
+    }
+
+    .form-group {
+      margin-bottom: 12px;
+    }
+    .form-label {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-bottom: 4px;
+      display: block;
+    }
+    .form-input {
+      width: 100%;
+      background: #0d1117;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      padding: 9px 12px;
+      color: var(--text-main);
+      font-size: 14px;
+    }
+
+    /* 移动端友好：紧凑单行上传触发器 */
+    .btn-mobile-upload {
+      width: 100%;
+      height: 42px;
+      background: #0d1117;
+      border: 1px dashed var(--card-border);
+      border-radius: 6px;
+      color: #58a6ff;
+      font-size: 13px;
+      font-weight: 500;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+    .btn-mobile-upload:active {
+      background: #161b22;
+      border-color: #58a6ff;
+    }
+
+    .photo-preview-card {
+      background: #0d1117;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 8px 12px;
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+    .photo-thumb {
+      width: 44px;
+      height: 56px;
+      object-fit: cover;
+      border-radius: 4px;
+      border: 1px solid #30363d;
+      background: #010409;
+      flex-shrink: 0;
+    }
+    .photo-info { flex: 1; min-width: 0; }
+    .photo-filename {
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text-main);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      margin-bottom: 3px;
+    }
+    .photo-status { font-size: 11px; color: #3fb950; }
+    .photo-actions { display: flex; align-items: center; gap: 6px; flex-shrink: 0; }
+    .btn-photo-replace {
+      background: #21262d;
+      border: 1px solid var(--card-border);
+      color: var(--text-muted);
+      border-radius: 4px;
+      font-size: 11px;
+      padding: 4px 8px;
+      cursor: pointer;
+    }
+    .btn-photo-replace:hover { color: var(--text-main); border-color: #58a6ff; }
+    .btn-photo-remove {
+      background: transparent;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 14px;
+      padding: 4px 6px;
+      border-radius: 4px;
+    }
+    .btn-photo-remove:hover { color: #f85149; }
+
+    /* 考点刷新小按钮 */
+    .btn-refresh {
+      margin: 0 !important;
+      box-shadow: none !important;
+      display: inline-flex;
+      flex-shrink: 0;
+      white-space: nowrap;
+      align-items: center;
+      justify-content: center;
+      gap: 4px;
+      padding: 0 8px;
+      height: 24px;
+      font-size: 11px;
+      font-weight: 500;
+      color: #c9d1d9;
+      background: #21262d;
+      border: 1px solid var(--card-border);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background 0.15s ease, border-color 0.15s ease, color 0.15s ease, opacity 0.15s ease;
+      vertical-align: middle;
+      line-height: 1;
+      user-select: none;
+    }
+    .btn-refresh[hidden] { display: none; }
+    .exam-location-fields .form-group { margin-bottom: 12px; }
+    .location-field-header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 18px;
+      margin-bottom: 4px;
+    }
+    .location-field-header .form-label { margin: 0 auto 0 0; }
+    .location-field-status { color: var(--text-muted); font-size: 12px; }
+    .location-field-control { display: flex; align-items: stretch; gap: 8px; }
+    .exam-location-fields .btn-refresh {
+      height: auto;
+      min-width: 44px;
+      font-size: 12px;
+      background: transparent;
+    }
+    .exam-location-fields .form-input { min-width: 0; flex: 1; margin-bottom: 0; }
+    .location-note { margin: 0 0 14px; color: var(--text-muted); font-size: 12px; }
+    .location-note summary { font-size: inherit; color: inherit; cursor: pointer; }
+    .location-note p { margin: 6px 0 0; font-size: inherit; line-height: 1.5; }
+    .exam-location-fields :focus-visible { outline: 2px solid var(--text-main); outline-offset: 2px; }
+    @media (max-width: 600px) {
+      .exam-location-fields .btn-refresh { min-height: 44px; }
+      .exam-location-fields .form-input { min-height: 44px; }
+      .location-note summary { min-height: 44px; padding: 12px 0; line-height: 20px; }
+    }
+    .btn-refresh:hover:not(:disabled) {
+      background: #30363d;
+      border-color: #58a6ff;
+      color: #58a6ff;
+    }
+    .btn-refresh:active:not(:disabled) {
+      background: #161b22;
+      transform: translateY(0.5px);
+    }
+    .btn-refresh:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+    }
+    .btn-refresh .refresh-icon {
+      width: 12px;
+      height: 12px;
+      stroke: currentColor;
+      flex-shrink: 0;
+    }
+    .btn-refresh.loading .refresh-icon {
+      animation: spin-refresh 0.75s linear infinite;
+    }
+    @keyframes spin-refresh {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+
+    /* 日志弹窗 */
+    .log-terminal {
+      background: #090d13;
+      border: 1px solid var(--card-border);
+      border-radius: 8px;
+      padding: 12px;
+      font-family: var(--font-mono);
+      font-size: 12px;
+      color: #7ee787;
+      height: 280px;
+      overflow-y: auto;
+      line-height: 1.5;
+      margin-bottom: 12px;
+    }
+    .log-line { margin-bottom: 4px; word-break: break-all; }
+  </style>
+</head>
+<body>
+
+  <!-- 顶部状态栏 -->
+  <header class="top-header">
+    <div class="brand-title">
+      <div class="pulse-dot"></div>
+      <span>SAT 本机控制台</span>
+    </div>
+    <div>
+      <button class="operator-badge" onclick="openSettingsModal()" title="系统全局设置" style="cursor: pointer; border: 1px solid var(--card-border);">⚙️ 设置</button>
+    </div>
+  </header>
+
+  <!-- 全局指标条 -->
+  <section class="metric-strip">
+    <div class="metric-item">
+      <div class="metric-num" id="statRunning">0</div>
+      <div class="metric-label">监控中</div>
+    </div>
+    <div class="metric-item">
+      <div class="metric-num" id="statPolls">0</div>
+      <div class="metric-label">累计轮询</div>
+    </div>
+    <div class="metric-item">
+      <div class="metric-num" id="statLocks">0</div>
+      <div class="metric-label">已确认完成</div>
+    </div>
+  </section>
+
+  <!-- 任务列表容器 -->
+  <main class="container-box" id="taskListContainer">
+    <!-- 动态卡片插入 -->
+    <div style="text-align: center; color: var(--text-muted); padding: 40px 0;">
+      正在加载监控任务...
+    </div>
+  </main>
+
+  <!-- 底部固定录单按钮 -->
+  <footer class="bottom-bar">
+    <button class="btn-primary-add" onclick="openAddSheet()">
+      <span>+</span> 发起考位监控
+    </button>
+  </footer>
+
+  <!-- 遮罩 -->
+  <div class="sheet-overlay" id="overlay" onclick="closeAllSheets()"></div>
+
+  <!-- 新增抢位任务抽屉 -->
+  <div class="sheet-content" id="addSheet">
+    <div class="sheet-title">
+      <span id="taskSheetTitle">发起考位监控</span>
+      <button class="sheet-close" onclick="closeAllSheets()">✕</button>
+    </div>
+
+    <form id="taskForm" onsubmit="handleCreateTask(event)">
+      <p id="editTaskNotice" role="status" style="display:none;color:var(--text-muted);font-size:13px;">仅修改本地任务，保存后需手动启动。若已进入官网报名流程，请核对官网考期和照片；本地保存不代表官网已更新。</p>
+      <div class="form-group">
+        <label class="form-label">考生姓名 / 微信备注</label>
+        <input type="text" id="formName" class="form-input" placeholder="例如：曾同学" value="曾同学" required>
+      </div>
+
+      <div class="exam-location-fields">
+      <div class="form-group">
+        <div class="location-field-header">
+          <label class="form-label" for="formDate">考试日期</label>
+          <span id="dateLoadStatus" class="location-field-status" role="status"></span>
+        </div>
+        <div class="location-field-control">
+        <select id="formDate" class="form-input" onchange="loadOfficialCenters(true)" required disabled>
+          <option value="" disabled selected>请选择考试日期</option>
+        </select>
+        <button type="button" id="btnRefreshDates" class="btn-refresh" onclick="loadOfficialExamDates()" aria-label="刷新考试日期列表">刷新</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="location-field-header">
+          <label class="form-label" for="formRegion">考试国家／地区</label>
+          <span id="regionLoadStatus" class="location-field-status" role="status"></span>
+        </div>
+        <div class="location-field-control">
+        <select id="formRegion" class="form-input" onchange="loadOfficialCenters(true)" required disabled>
+          <option value="" disabled selected>请选择国家／地区</option>
+        </select>
+        <button type="button" id="btnRefreshRegions" class="btn-refresh" onclick="loadOfficialRegions()" aria-label="刷新国家／地区列表">刷新</button>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <div class="location-field-header">
+          <label class="form-label" for="formCenter">目标考点</label>
+          <span id="centerLoadStatus" class="location-field-status" role="status"></span>
+        </div>
+        <div class="location-field-control">
+        <select id="formCenter" class="form-input">
+          <option value="">全区任意考点</option>
+        </select>
+        <button type="button" id="btnRefreshCenters" class="btn-refresh" onclick="loadOfficialCenters()" aria-label="刷新考点列表">刷新</button>
+        </div>
+      </div>
+      <details class="location-note">
+        <summary>国际考区 · 考位以官网查询为准</summary>
+        <p>地区与考点来自 SAT 官网，数据可能有缓存。美国需邮编查询，暂不支持；考位以登录后的报名查询为准。</p>
+      </details>
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">考生证件照 (选填，自动填单上传使用)</label>
+        <input type="file" id="formPhoto" accept="image/jpeg,image/png,image/webp" style="display: none;" onchange="handlePhotoSelect(this.files)">
+        
+        <!-- 手机端紧凑触发条：高度 42px，触控友好 -->
+        <button type="button" class="btn-mobile-upload" id="photoTriggerBtn" onclick="document.getElementById('formPhoto').click()">
+          <span>📷</span>
+          <span>从手机相册选择证件照 (JPG / PNG)</span>
+        </button>
+
+        <!-- 选中状态：缩略图预览卡片 -->
+        <div class="photo-preview-card" id="photoPreviewCard" style="display: none;">
+          <img id="photoPreviewImg" class="photo-thumb" src="" alt="证件照预览">
+          <div class="photo-info">
+            <div class="photo-filename" id="photoFileName">-</div>
+            <div class="photo-status" id="photoFileSize">-</div>
+          </div>
+          <div class="photo-actions">
+            <button type="button" class="btn-photo-replace" onclick="document.getElementById('formPhoto').click()">更换</button>
+            <button type="button" class="btn-photo-remove" onclick="clearSelectedPhoto()" title="移除照片">✕</button>
+          </div>
+        </div>
+      </div>
+
+      <button type="submit" class="btn-primary-add" style="margin-top: 10px;">
+        保存考生任务（稍后手动启动）
+      </button>
+    </form>
+  </div>
+
+  <!-- 全局配置抽屉 -->
+  <div class="sheet-content" id="settingsSheet">
+    <div class="sheet-title">
+      <span>⚙️ 系统全局配置</span>
+      <button class="sheet-close" onclick="closeAllSheets()">✕</button>
+    </div>
+
+    <form id="settingsForm" onsubmit="handleSaveSettings(event)">
+      <div style="font-size: 13px; font-weight: 700; color: #58a6ff; margin-bottom: 8px;">🔐 核心 SAT 官网凭证</div>
+      
+      <div class="form-group">
+        <label class="form-label" for="setAccount">全局 SAT 账号</label>
+        <input type="email" id="setAccount" class="form-input" placeholder="所有任务统一使用的 SAT 邮箱" autocomplete="off">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="setPassword">全局 SAT 密码</label>
+        <input type="password" id="setPassword" class="form-input" placeholder="全局 SAT 账号的密码" autocomplete="new-password">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label">微信 Pushplus Token (用于全员锁位报警秒推)</label>
+        <input type="text" id="setToken" class="form-input" placeholder="例如：9a8b7c6d5e...">
+      </div>
+
+      <div class="form-group">
+        <label class="form-label" for="setAutoRules" style="display:flex;align-items:center;gap:6px;cursor:pointer;">
+          <input type="checkbox" id="setAutoRules" style="width:auto;margin:0;">
+          自动接受考试规则（滚动条款、勾选并 Continue；任一步骤失败仍转人工）
+        </label>
+      </div>
+
+      <hr style="border-color: var(--card-border); margin: 16px 0;">
+
+      <div style="font-size: 13px; font-weight: 700; color: #58a6ff; margin-bottom: 8px;">💳 支付表单预填（选填，最终人工付款）</div>
+      <div class="form-group">
+        <label class="form-label">信用卡号</label>
+        <input type="text" id="setCardNumber" class="form-input" placeholder="4111 2222 3333 4444">
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px;">
+        <div class="form-group">
+          <label class="form-label">到期月</label>
+          <input type="text" id="setCardMonth" class="form-input" placeholder="08">
+        </div>
+        <div class="form-group">
+          <label class="form-label">到期年</label>
+          <input type="text" id="setCardYear" class="form-input" placeholder="2028">
+        </div>
+        <div class="form-group">
+          <label class="form-label">CVV</label>
+          <input type="password" id="setCardCvv" class="form-input" placeholder="选填" autocomplete="off">
+        </div>
+      </div>
+
+      <p style="font-size: 12px; color: var(--text-muted);">本机版不会自动提交付款。请在任务浏览器中核对金额、考期和考点后人工确认。</p>
+
+      <button type="submit" class="btn-primary-add" style="margin-top: 16px;">
+        💾 保存全局配置
+      </button>
+    </form>
+  </div>
+
+  <!-- 实时日志抽屉 -->
+  <div class="sheet-content" id="logSheet">
+    <div class="sheet-title">
+      <span id="logSheetTitle">任务实时流水</span>
+      <button class="sheet-close" onclick="closeAllSheets()">✕</button>
+    </div>
+    <div class="log-terminal" id="logTerminal"></div>
+    <button type="button" class="btn-act" style="width: 100%;" onclick="closeAllSheets()">关闭流水</button>
+  </div>
+
+  <script>
+    let currentTasks = [];
+    let currentLogsTaskId = null;
+
+    // SSE 建立长连接
+    function initSSE() {
+      const evtSource = new EventSource('/api/events');
+      
+      evtSource.addEventListener('init', (e) => {
+        const data = JSON.parse(e.data);
+        currentTasks = data.tasks;
+        renderTasks();
+        updateStats(data.stats);
+      });
+
+      evtSource.addEventListener('task_created', (e) => {
+        const task = JSON.parse(e.data);
+        currentTasks.unshift(task);
+        renderTasks();
+      });
+
+      evtSource.addEventListener('task_updated', (e) => {
+        const updated = JSON.parse(e.data);
+        const idx = currentTasks.findIndex(t => t.id === updated.id);
+        if (idx !== -1) currentTasks[idx] = updated;
+        renderTasks();
+      });
+
+      evtSource.addEventListener('task_deleted', (e) => {
+        const { id } = JSON.parse(e.data);
+        currentTasks = currentTasks.filter(t => t.id !== id);
+        renderTasks();
+      });
+
+      evtSource.addEventListener('log', (e) => {
+        const { taskId, log } = JSON.parse(e.data);
+        const task = currentTasks.find(t => t.id === taskId);
+        if (task) {
+          task.lastLog = log;
+          const logEl = document.getElementById(`log_prev_${taskId}`);
+          if (logEl) logEl.innerText = log;
+        }
+        if (currentLogsTaskId === taskId) {
+          appendLogLine(log);
+        }
+      });
+    }
+
+    function updateStats(stats) {
+      if (!stats) return;
+      document.getElementById('statPolls').innerText = stats.totalPolls || 0;
+    }
+
+    function renderTasks() {
+      const container = document.getElementById('taskListContainer');
+      const runningCount = currentTasks.filter(t => t.status === 'running').length;
+      document.getElementById('statRunning').innerText = runningCount;
+      document.getElementById('statLocks').innerText = currentTasks.filter(t => t.status === 'completed').length;
+
+      if (currentTasks.length === 0) {
+        container.innerHTML = `
+          <div style="text-align: center; color: var(--text-muted); padding: 50px 0;">
+            <div style="font-size: 32px; margin-bottom: 8px;">📋</div>
+            <div>暂无监控任务</div>
+            <div style="font-size: 12px; margin-top: 4px;">点击底部按钮立即录入一单</div>
+          </div>
+        `;
+        return;
+      }
+
+      container.innerHTML = currentTasks.map(t => {
+        const isLocked = t.status === 'locked';
+        const needsAction = t.status === 'needs_action';
+        let badgeHtml = '';
+        if (t.status === 'running') badgeHtml = `<span class="status-badge badge-running">轮询中 (${t.pollCount || 0}次)</span>`;
+        else if (t.status === 'locked') badgeHtml = `<span class="status-badge badge-locked">已锁位</span>`;
+        else if (t.status === 'completed') badgeHtml = `<span class="status-badge" style="background:rgba(56,139,253,0.18);color:#58a6ff;border:1px solid #388bfd;">已完成</span>`;
+        else if (t.status === 'error') badgeHtml = `<span class="status-badge badge-error">异常</span>`;
+        else if (needsAction) badgeHtml = `<span class="status-badge badge-locked">待人工核对</span>`;
+        else badgeHtml = `<span class="status-badge badge-idle">未启动</span>`;
+
+        let countdownHtml = '';
+        if (isLocked) {
+          countdownHtml = `
+            <div class="countdown-banner">
+              <div>⚠️ 考位已独占锁定：${t.lockedCenter || '已选考位'}</div>
+              <div class="countdown-timer" id="cd_${t.id}">20:00</div>
+            </div>
+          `;
+        }
+
+        const isRunning = t.status === 'running' || needsAction || isLocked;
+        const startBtnText = isRunning ? '暂停' : '启动监控';
+        const startBtnClass = isRunning ? 'btn-stop' : 'btn-start';
+        const startAction = isRunning ? `stopTask('${t.id}')` : `startTask('${t.id}')`;
+
+        return `
+          <div class="task-card ${isLocked ? 'is-locked' : ''}">
+            <div class="task-top">
+              <div>${badgeHtml}</div>
+            </div>
+
+            ${countdownHtml}
+            ${needsAction && t.selection ? `<p role="status">${escapeHtml(t.selection.message)}</p>` : ''}
+
+            <div class="task-details">
+              <div class="task-date">${escapeHtml(t.targetDate)} SAT</div>
+              <div>${escapeHtml(t.targetRegion || 'Hong Kong')}</div>
+              <div class="task-center">${escapeHtml(Array.isArray(t.targetCenters) && t.targetCenters.length > 0 ? t.targetCenters.join(', ') : '全区任意考点')}</div>
+              <div class="task-photo">证件照：${t.photoPath ? `<a href="/api/tasks/${t.id}/photo" target="_blank" rel="noopener">查看照片</a>` : '未上传'}</div>
+            </div>
+
+            <div class="task-log-preview ${t.status === 'error' ? 'has-error' : ''}" id="log_prev_${t.id}">${escapeHtml(t.lastLog || '暂无日志')}</div>
+
+            <div class="card-actions">
+              <button class="btn-act ${startBtnClass}" onclick="${startAction}">${startBtnText}</button>
+              ${isLocked || (needsAction && t.lockedCenter) ? `<button class="btn-act" style="color:#58a6ff;border-color:#388bfd;" onclick="completeTask('${t.id}')">确认已付款</button>` : ''}
+              <button class="btn-act btn-secondary" onclick="showLogs('${t.id}')">查看日志</button>
+              ${t.status !== 'completed' ? `<button class="btn-act btn-secondary" onclick="openEditSheet('${t.id}')" ${isRunning ? 'disabled title="请先暂停任务，再编辑"' : ''}>编辑</button>` : ''}
+              <button class="btn-act btn-secondary btn-del" onclick="deleteTask('${t.id}')">删除</button>
+            </div>
+            <div class="task-last-check">上次检查：${escapeHtml(t.lastCheckTime || '尚未开始')}</div>
+          </div>
+        `;
+      }).join('');
+    }
+
+    // 操作逻辑
+    function escapeHtml(value) {
+      return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+    }
+
+    async function taskAction(id, action) {
+      try {
+        const response = await fetch(`/api/tasks/${id}/${action}`, { method: 'POST' });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || '操作失败');
+      } catch (err) {
+        alert(err.message || '连接失败，请检查本机启动窗口是否仍然开启');
+      }
+    }
+    async function completeTask(id) {
+      if (!confirm('确认该考位已锁定并成功缴费，标记为完成吗？\n（将安全回收本地浏览器环境与临时截图）')) return;
+      await taskAction(id, 'complete');
+    }
+
+    async function startTask(id) {
+      await taskAction(id, 'start');
+    }
+
+    async function stopTask(id) {
+      await taskAction(id, 'stop');
+    }
+
+    async function deleteTask(id) {
+      if (!confirm('确定删除该订单吗？')) return;
+      await fetch(`/api/tasks/${id}`, { method: 'DELETE' });
+    }
+
+    let editingTaskId = null;
+    let photoRemoved = false;
+    let centerRequest = 0;
+    let regionRequest = 0;
+
+    async function loadOfficialRegions() {
+      if (editingTaskId) return;
+      const request = ++regionRequest;
+      ++centerRequest;
+      const region = document.getElementById('formRegion');
+      const status = document.getElementById('regionLoadStatus');
+      const refresh = document.getElementById('btnRefreshRegions');
+      region.disabled = true;
+      region.innerHTML = '<option value="" disabled selected>请选择国家／地区</option>';
+      document.getElementById('formCenter').disabled = true;
+      document.getElementById('formCenter').innerHTML = '<option value="" disabled selected>请先选择国家／地区</option>';
+      document.getElementById('centerLoadStatus').innerText = '';
+      document.getElementById('btnRefreshCenters').disabled = true;
+      document.getElementById('btnRefreshCenters').classList.remove('loading');
+      refresh.disabled = true;
+      refresh.innerText = '刷新';
+      status.innerText = '加载中…';
+      try {
+        const response = await fetch('/api/sat-regions', { cache: 'no-store' });
+        if (!response.ok) throw new Error('加载失败');
+        const data = await response.json();
+        if (request !== regionRequest) return;
+        if (!Array.isArray(data.regions) || !data.regions.length || data.regions.some(r =>
+          !r || typeof r.name !== 'string' || !r.name.trim() || !/^[A-Z]{2}$/.test(r.code) || r.code === 'US')) throw new Error('地区数据无效');
+        region.innerHTML = '<option value="" disabled selected>请选择国家／地区</option>';
+        const regionNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' });
+        for (const r of data.regions) {
+          const option = new Option(`${r.code} ${regionNames.of(r.code)} (${r.name})`, r.code);
+          option.dataset.region = r.name;
+          region.add(option);
+        }
+        region.disabled = false;
+        status.innerText = `获取于 ${new Date(data.fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+      } catch (error) {
+        if (request !== regionRequest) return;
+        region.innerHTML = '<option value="" disabled selected>请选择国家／地区</option>';
+        status.innerText = '加载失败';
+        refresh.innerText = '重试';
+      } finally {
+        if (request === regionRequest) refresh.disabled = false;
+      }
+    }
+
+    let dateRequest = 0;
+
+    async function loadOfficialExamDates() {
+      const request = ++dateRequest;
+      const dateSelect = document.getElementById('formDate');
+      const status = document.getElementById('dateLoadStatus');
+      const refresh = document.getElementById('btnRefreshDates');
+      const savedDate = dateSelect.value;
+      dateSelect.disabled = true;
+      refresh.disabled = true;
+      refresh.innerText = '刷新';
+      status.innerText = '加载中…';
+      if (!editingTaskId) {
+        // 新建模式先清空；编辑模式保留已保存考期，加载失败也能按原值保存
+        dateSelect.innerHTML = '<option value="" disabled selected>请选择考试日期</option>';
+        // 考期重新加载后，已加载考点对新考期无效
+        ++centerRequest;
+        const centerSelect = document.getElementById('formCenter');
+        centerSelect.disabled = true;
+        centerSelect.innerHTML = '<option value="" disabled selected>请先选择考试日期</option>';
+        document.getElementById('centerLoadStatus').innerText = '';
+        document.getElementById('btnRefreshCenters').disabled = true;
+      }
+      try {
+        const response = await fetch('/api/sat-exam-dates', { cache: 'no-store' });
+        if (!response.ok) throw new Error('加载失败');
+        const data = await response.json();
+        if (request !== dateRequest) return;
+        if (!Array.isArray(data.dates) || !data.dates.length ||
+            data.dates.some(d => typeof d !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(d))) throw new Error('考期数据无效');
+        dateSelect.innerHTML = '<option value="" disabled selected>请选择考试日期</option>';
+        const fmt = new Intl.DateTimeFormat('zh-CN', { year: 'numeric', month: 'long', day: 'numeric', weekday: 'long', timeZone: 'UTC' });
+        for (const d of data.dates) dateSelect.add(new Option(fmt.format(new Date(d + 'T00:00:00Z')), d));
+        if (savedDate && !data.dates.includes(savedDate)) dateSelect.add(new Option(`${savedDate}（已保存）`, savedDate));
+        dateSelect.disabled = false;
+        if (savedDate) dateSelect.value = savedDate;
+        status.innerText = `获取于 ${new Date(data.fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+      } catch (error) {
+        if (request !== dateRequest) return;
+        if (!editingTaskId) dateSelect.innerHTML = '<option value="" disabled selected>请选择考试日期</option>';
+        status.innerText = '加载失败';
+        refresh.innerText = '重试';
+      } finally {
+        if (request === dateRequest) refresh.disabled = false;
+      }
+    }
+
+    async function loadOfficialCenters(resetSelection = false) {
+      const date = document.getElementById('formDate').value;
+      const regionEl = document.getElementById('formRegion');
+      const country = regionEl.value;
+      const statusEl = document.getElementById('centerLoadStatus');
+      const centerSelect = document.getElementById('formCenter');
+      const refreshBtn = document.getElementById('btnRefreshCenters');
+
+      const request = ++centerRequest;
+      const editing = editingTaskId;
+      if (editing) resetSelection = true;
+      const previousVal = resetSelection ? null : centerSelect.value;
+      centerSelect.disabled = true;
+      centerSelect.innerHTML = '<option value="" disabled selected>请等待考点加载</option>';
+      refreshBtn.innerText = '刷新';
+      if (!date || !country || (!editing && regionEl.disabled)) {
+        statusEl.innerText = '';
+        centerSelect.innerHTML = '<option value="" disabled selected>请先选择日期和地区</option>';
+        refreshBtn.disabled = true;
+        refreshBtn.classList.remove('loading');
+        return;
+      }
+      statusEl.innerText = '加载中…';
+      if (refreshBtn) {
+        refreshBtn.disabled = true;
+        refreshBtn.classList.add('loading');
+      }
+      
+      try {
+        const resp = await fetch(`/api/sat-centers?date=${encodeURIComponent(date)}&country=${encodeURIComponent(country)}`, { cache: 'no-store' });
+        if (!resp.ok) throw new Error('考点加载失败');
+        const centers = await resp.json();
+        if (request !== centerRequest) return;
+        if (!Array.isArray(centers)) throw new Error('考点数据无效');
+        
+        let html = '<option value="">全区任意考点</option>';
+        if (Array.isArray(centers) && centers.length > 0) {
+          centers.forEach(c => {
+            html += `<option value="${escapeHtml(c.name)}" data-code="${escapeHtml(c.code || '')}">[${escapeHtml(c.code || '考点')}] ${escapeHtml(c.name)}</option>`;
+          });
+          statusEl.innerText = `${centers.length} 个 · 获取于 ${new Date().toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
+        } else {
+          statusEl.innerText = '未返回考点 · 考位未知';
+          refreshBtn.innerText = '重试';
+        }
+        centerSelect.innerHTML = html;
+        if (editing && resetSelection) {
+          centerSelect.insertAdjacentHTML('afterbegin', '<option value="" disabled selected>请选择考点或明确选择全区任意考点</option>');
+          centerSelect.selectedIndex = 0;
+        } else if (previousVal) {
+          centerSelect.value = previousVal;
+          if (centerSelect.selectedIndex === -1) centerSelect.selectedIndex = 0;
+        }
+      } catch (err) {
+        if (request !== centerRequest) return;
+        statusEl.innerText = '加载失败';
+        refreshBtn.innerText = '重试';
+        centerSelect.innerHTML = '<option value="" disabled selected>请重新加载考点</option>';
+      } finally {
+        if (request === centerRequest && refreshBtn) {
+          refreshBtn.disabled = false;
+          refreshBtn.classList.remove('loading');
+          centerSelect.disabled = false;
+        }
+      }
+    }
+
+    async function handleCreateTask(e) {
+      e.preventDefault();
+      const submitButton = document.querySelector('#taskForm button[type="submit"]');
+      if (submitButton.disabled) return;
+      submitButton.disabled = true;
+      try {
+      const taskId = editingTaskId;
+      const centerEl = document.getElementById('formCenter');
+      if (!taskId && (document.getElementById('formRegion').disabled || !document.getElementById('formRegion').value)) {
+        throw new Error('请先加载官网地区列表并选择国家／地区');
+      }
+      if (!taskId && (document.getElementById('formDate').disabled || !document.getElementById('formDate').value)) {
+        throw new Error('请先加载官网考期列表并选择考试日期');
+      }
+      if (centerEl.disabled || centerEl.selectedOptions[0]?.disabled || centerEl.selectedIndex < 0) {
+        throw new Error('请等待考点加载完成，并确认考点选择');
+      }
+      const currentOp = localStorage.getItem('sat_operator') || '曾总';
+      const photoEl = document.getElementById('formPhoto');
+      const file = photoEl && photoEl.files ? photoEl.files[0] : null;
+
+      let photoBase64 = null;
+      if (file) {
+        photoBase64 = await new Promise((resolve, reject) => {
+          const reader = new FileReader();
+          reader.onload = (evt) => resolve(evt.target.result);
+          reader.onerror = () => reject(new Error('照片读取失败，请重新选择'));
+          reader.readAsDataURL(file);
+        });
+      }
+
+      const regionSelect = document.getElementById('formRegion');
+      const targetCountryCode = regionSelect.value;
+      const selectedOption = regionSelect.options[regionSelect.selectedIndex];
+      const targetRegion = selectedOption.getAttribute('data-region');
+      const centerSelect = document.getElementById('formCenter');
+      const targetCenter = centerSelect.value ? centerSelect.value : null;
+      const targetCode = centerSelect.selectedOptions[0]?.getAttribute('data-code');
+      // 双重匹配：同时传入考点5位代码与全称，确保高精度锁定
+      const targetCenters = [];
+      if (targetCode) targetCenters.push(targetCode);
+      if (targetCenter && !targetCenters.includes(targetCenter)) targetCenters.push(targetCenter);
+
+      let payload = {
+        name: document.getElementById('formName').value,
+        targetDate: document.getElementById('formDate').value,
+        targetRegion,
+        targetCountryCode,
+        targetCenters,
+        operator: currentOp,
+        photoBase64
+      };
+      if (taskId) {
+        const task = currentTasks.find(t => t.id === taskId);
+        payload = {
+          targetDate: payload.targetDate,
+          targetCenters: centerSelect.selectedOptions[0]?.hasAttribute('data-existing') ? task.targetCenters || [] : targetCenters
+        };
+        if (file) payload.photoBase64 = photoBase64;
+        else if (photoRemoved) payload.removePhoto = true;
+      }
+
+      const res = await fetch(taskId ? `/api/tasks/${taskId}` : '/api/tasks', {
+        method: taskId ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await res.json();
+      if (data.success) {
+        document.getElementById('taskForm').reset();
+        clearSelectedPhoto();
+        closeAllSheets();
+      } else {
+        alert(data.error || '创建失败');
+      }
+      } catch (err) {
+        alert(err.message || '保存失败，请检查本机服务和任务列表，确认是否已保存后再重试');
+      } finally {
+        submitButton.disabled = false;
+      }
+    }
+
+    async function showLogs(taskId) {
+      const name = currentTasks.find(task => task.id === taskId)?.name || '任务';
+      currentLogsTaskId = taskId;
+      document.getElementById('logSheetTitle').innerText = `${name} · 实时运行流水`;
+      const term = document.getElementById('logTerminal');
+      term.innerHTML = '正在加载流水...';
+
+      const res = await fetch(`/api/tasks/${taskId}/logs`);
+      const data = await res.json();
+      term.innerHTML = (data.logs || []).map(l => `<div class="log-line">${escapeHtml(l)}</div>`).join('');
+      term.scrollTop = term.scrollHeight;
+
+      openSheet('logSheet');
+    }
+
+    function appendLogLine(line) {
+      const term = document.getElementById('logTerminal');
+      const div = document.createElement('div');
+      div.className = 'log-line';
+      div.innerText = line;
+      term.appendChild(div);
+      term.scrollTop = term.scrollHeight;
+    }
+
+    function openAddSheet() {
+      resetTaskForm();
+      openSheet('addSheet');
+      loadOfficialExamDates();
+      loadOfficialRegions();
+    }
+
+    function resetTaskForm() {
+      centerRequest++;
+      regionRequest++;
+      dateRequest++;
+      editingTaskId = null;
+      document.getElementById('taskForm').reset();
+      clearSelectedPhoto();
+      photoRemoved = false;
+      document.getElementById('formName').disabled = false;
+      document.getElementById('formDate').disabled = false;
+      document.getElementById('btnRefreshDates').disabled = false;
+      document.getElementById('btnRefreshDates').innerText = '刷新';
+      document.getElementById('dateLoadStatus').innerText = '';
+      document.getElementById('formRegion').disabled = false;
+      document.getElementById('btnRefreshRegions').hidden = false;
+      document.getElementById('btnRefreshRegions').disabled = false;
+      document.getElementById('btnRefreshRegions').innerText = '刷新';
+      document.getElementById('regionLoadStatus').innerText = '';
+      document.getElementById('formCenter').disabled = false;
+      document.getElementById('btnRefreshCenters').disabled = false;
+      document.getElementById('btnRefreshCenters').innerText = '刷新';
+      document.getElementById('btnRefreshCenters').classList.remove('loading');
+      document.getElementById('formCenter').innerHTML = '<option value="">全区任意考点</option>';
+      document.querySelector('.location-note').open = false;
+      document.getElementById('centerLoadStatus').innerText = '';
+      document.getElementById('taskSheetTitle').innerText = '发起考位监控';
+      document.getElementById('editTaskNotice').style.display = 'none';
+      document.querySelector('#taskForm button[type="submit"]').textContent = '保存考生任务（稍后手动启动）';
+    }
+
+    function openEditSheet(id) {
+      const task = currentTasks.find(t => t.id === id);
+      if (!task || !['idle', 'error'].includes(task.status)) return alert('请先停止任务；已完成任务不能编辑');
+      resetTaskForm();
+      editingTaskId = id;
+      document.getElementById('formName').value = task.name || '';
+      document.getElementById('formName').disabled = true;
+      const savedRegion = new Option(`${task.targetCountryCode || ''} ${task.targetRegion || task.targetCountryCode || '未设置地区'}`, task.targetCountryCode || '');
+      savedRegion.dataset.region = task.targetRegion || '';
+      document.getElementById('formRegion').replaceChildren(savedRegion);
+      document.getElementById('formRegion').disabled = true;
+      document.getElementById('btnRefreshRegions').hidden = true;
+      document.getElementById('regionLoadStatus').innerText = '已保存 · 未刷新';
+      const savedDate = new Option(`${task.targetDate}（已保存）`, task.targetDate);
+      document.getElementById('formDate').replaceChildren(savedDate);
+      const centers = task.targetCenters || [];
+      document.getElementById('formCenter').innerHTML = `<option value="existing" data-existing>保留原考点：${escapeHtml(centers.length ? centers.join(', ') : '全区任意考点')}</option>`;
+      if (task.photoPath) {
+        document.getElementById('photoPreviewImg').src = `/api/tasks/${id}/photo`;
+        document.getElementById('photoFileName').textContent = '当前证件照';
+        document.getElementById('photoFileSize').textContent = '未更换时保留原图';
+        document.getElementById('photoTriggerBtn').style.display = 'none';
+        document.getElementById('photoPreviewCard').style.display = 'flex';
+      }
+      document.getElementById('taskSheetTitle').innerText = '编辑任务';
+      document.getElementById('editTaskNotice').style.display = 'block';
+      document.querySelector('#taskForm button[type="submit"]').textContent = '保存修改（稍后手动启动）';
+      openSheet('addSheet');
+      loadOfficialExamDates();
+    }
+
+    function openSheet(id) {
+      document.getElementById('overlay').style.display = 'block';
+      document.getElementById(id).style.display = 'block';
+    }
+
+    function closeAllSheets() {
+      regionRequest++;
+      centerRequest++;
+      dateRequest++;
+      document.getElementById('overlay').style.display = 'none';
+      document.getElementById('addSheet').style.display = 'none';
+      document.getElementById('settingsSheet').style.display = 'none';
+      document.getElementById('logSheet').style.display = 'none';
+      currentLogsTaskId = null;
+    }
+
+    function initOperator() {
+      const saved = localStorage.getItem('sat_operator') || '曾总';
+      const label = document.getElementById('operatorLabel');
+      if (label) label.innerText = `👤 ${saved}`;
+    }
+
+    function changeOperator() {
+      const current = localStorage.getItem('sat_operator') || '曾总';
+      const next = prompt('请输入当前操作员/经办人姓名：', current);
+      if (next && next.trim()) {
+        localStorage.setItem('sat_operator', next.trim());
+        initOperator();
+      }
+    }
+
+    async function openSettingsModal() {
+      try {
+        const res = await fetch('/api/settings').then(r => r.json());
+        const s = res.settings || {};
+        document.getElementById('setAccount').value = s.satAccount || '';
+        document.getElementById('setPassword').value = s.satPassword || '';
+        document.getElementById('setToken').value = s.pushplusToken || '';
+        document.getElementById('setAutoRules').checked = !!s.autoAcceptRules;
+        const card = s.cardInfo || {};
+        document.getElementById('setCardNumber').value = card.number || '';
+        document.getElementById('setCardMonth').value = card.expMonth || '';
+        document.getElementById('setCardYear').value = card.expYear || '';
+        document.getElementById('setCardCvv').value = card.cvv || '';
+      } catch (e) {}
+      openSheet('settingsSheet');
+    }
+
+    async function handleSaveSettings(e) {
+      e.preventDefault();
+      const payload = {
+        satAccount: document.getElementById('setAccount').value.trim(),
+        satPassword: document.getElementById('setPassword').value,
+        pushplusToken: document.getElementById('setToken').value.trim(),
+        autoAcceptRules: document.getElementById('setAutoRules').checked,
+        cardInfo: {
+          number: document.getElementById('setCardNumber').value.trim(),
+          expMonth: document.getElementById('setCardMonth').value.trim(),
+          expYear: document.getElementById('setCardYear').value.trim(),
+          cvv: document.getElementById('setCardCvv').value.trim(),
+          autoSubmit: false
+        }
+      };
+
+      try {
+      const response = await fetch('/api/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!response.ok) throw new Error('设置保存失败');
+      alert('✅ 系统全局设置保存成功！');
+      closeAllSheets();
+      } catch (err) {
+        alert('设置未保存，请检查本机服务后重试');
+      }
+    }
+
+    function handlePhotoSelect(files) {
+      if (!files || !files.length) return;
+      const file = files[0];
+      if (!['image/jpeg', 'image/png', 'image/webp'].includes(file.type) || file.size > 5 * 1024 * 1024) {
+        document.getElementById('formPhoto').value = '';
+        alert('请选择不超过 5 MB 的 JPG、PNG 或 WebP 图片');
+        return;
+      }
+      photoRemoved = false;
+
+      const reader = new FileReader();
+      reader.onload = (e) => {
+        document.getElementById('photoPreviewImg').src = e.target.result;
+        document.getElementById('photoFileName').textContent = file.name;
+        const sizeKb = (file.size / 1024).toFixed(0);
+        document.getElementById('photoFileSize').textContent = `● ${sizeKb} KB · 已就绪`;
+        document.getElementById('photoTriggerBtn').style.display = 'none';
+        document.getElementById('photoPreviewCard').style.display = 'flex';
+      };
+      reader.readAsDataURL(file);
+    }
+
+    function clearSelectedPhoto() {
+      photoRemoved = Boolean(editingTaskId);
+      const photoEl = document.getElementById('formPhoto');
+      if (photoEl) photoEl.value = '';
+      const previewImg = document.getElementById('photoPreviewImg');
+      if (previewImg) previewImg.src = '';
+      const triggerBtn = document.getElementById('photoTriggerBtn');
+      if (triggerBtn) triggerBtn.style.display = 'flex';
+      const previewCard = document.getElementById('photoPreviewCard');
+      if (previewCard) previewCard.style.display = 'none';
+    }
+
+    window.onload = () => {
+      initOperator();
+      initSSE();
+    };
+  </script>
+</body>
+</html>

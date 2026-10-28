@@ -1,0 +1,17 @@
+# dependencies
+node_modules/
+
+# runtime data: LevelDB/SQLite, logs, task & credential cache — DO NOT COMMIT
+data/
+
+# temporary / debug / backup files
+*.bak*
+tmp-*.js
+tmp-*.png
+*.png
+.probe.js
+probe-assets.js
+
+# local tooling & caches
+.workbuddy/
+.taste-skill/
