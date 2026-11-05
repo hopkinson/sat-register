@@ -15,3 +15,4 @@ probe-assets.js
 # local tooling & caches
 .workbuddy/
 .taste-skill/
+tmp-*.log

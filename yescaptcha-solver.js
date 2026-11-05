@@ -99,8 +99,39 @@ async function solveHCaptcha({ clientKey, websiteURL, websiteKey }) {
   throw new Error('hCaptcha 打码超时 (超过 90 秒)');
 }
 
+// 识别 hCaptcha 九宫格图片并返回选中目标索引布尔数组
+async function classifyHCaptcha({ clientKey, question, queries }) {
+  if (!clientKey || !question || !queries || !queries.length) return [];
+  const res = await fetch(`${YESCAPTCHA_HOST}/createTask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientKey, task: { type: 'HCaptchaClassification', question, queries } })
+  });
+  const data = await res.json();
+  if (data.errorId !== 0) throw new Error(data.errorDescription || data.errorCode);
+  if (data.status === 'ready' && Array.isArray(data.solution && data.solution.objects)) {
+    return data.solution.objects;
+  }
+  const start = Date.now();
+  while (Date.now() - start < 15000) {
+    await new Promise(r => setTimeout(r, 1000));
+    const r = await fetch(`${YESCAPTCHA_HOST}/getTaskResult`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clientKey, taskId: data.taskId })
+    });
+    const d = await r.json();
+    if (d.status === 'ready' && Array.isArray(d.solution && d.solution.objects)) {
+      return d.solution.objects;
+    }
+    if (d.status !== 'processing') break;
+  }
+  return [];
+}
+
 module.exports = {
   getBalance,
   solveFunCaptcha,
-  solveHCaptcha
+  solveHCaptcha,
+  classifyHCaptcha
 };

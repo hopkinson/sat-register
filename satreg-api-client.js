@@ -7,13 +7,19 @@
 //   - 端点 /msregadmintestcenter-prod/student/search-test-center-admins
 //   - 认证头 X-CB-Catapult-Authentication-Token: "CBLogin <JWT>"、X-CB-Catapult-Authorization-Token: <JWT>
 //   - 有临时 AWS 凭证时用 aws-api-gateway-client 做 SigV4（region us-east-1，service execute-api）
-//   - 响应里的 appToken 由官网自行保存并追加到后续 POST
+//   - 响应里的 appToken 由官网自行保存并追加到后续 POST（考期与查位两类请求都会带）
 //
 // 令牌只从已登录页面读取，在本进程里不落盘、不打日志，也不作为参数在模块间传递。
+// 页面内注入的 appToken 不会进入跨进程的请求体或返回值。
 
 const DEFAULT_SEARCH_URL =
   'https://satreg-api.collegeboard.org/msregadmintestcenter-prod/student/search-test-center-admins';
+const DEFAULT_UPCOMING_DATES_URL =
+  'https://satreg-api.collegeboard.org/msregrequest-prod/student/upcoming-test-dates';
 const DIRECTORY = 'msregadmintestcenter';
+// 官网报名应用在 003_index 里配置的 appId；查位请求体固定带 srcAppId: 115。
+const DEFAULT_SRC_APP_ID = 115;
+const UPCOMING_DIRECTORY = 'msregrequest';
 const REGION = 'us-east-1';
 const SERVICE = 'execute-api';
 
@@ -31,14 +37,51 @@ function withTimeout(promise, ms, message) {
 // SigV4 实现对齐 data/assets/060_aws-api-gateway-client-DxWvNndk.js：
 //   canonicalRequest = verb \n path \n query \n canonicalHeaders(末尾带换行) \n signedHeaders \n sha256(body)
 //   x-amz-security-token 在签名之后再加（与官网客户端一致，不参与签名）。
-async function inPageSearchRequest(options) {
+async function inPageApiRequest(options) {
   const opts = options || {};
+  const kind = opts.kind === 'upcoming-test-dates' ? 'upcoming-test-dates' : 'search';
   const url = String(opts.url || '');
-  const directory = opts.directory || 'msregadmintestcenter';
+  const directory = opts.directory || (kind === 'upcoming-test-dates' ? 'msregrequest' : 'msregadmintestcenter');
   const region = opts.region || 'us-east-1';
   const service = opts.service || 'execute-api';
   const timeoutMs = Number(opts.timeoutMs) || 15000;
-  const out = { signed: false, status: 0, ok: false, error: '', centerCount: 0 };
+  const out = { signed: false, status: 0, ok: false, error: '', centerCount: 0, dateCount: 0 };
+  // 官网前端把 appToken 存在 sessionStorage（react-utils 的 je: JSON {localState}）里；
+  // window 上的副本只覆盖本次页面生命周期，刷新后仍要能从站点自己的存储里读回。
+  const readPageAppToken = () => {
+    try {
+      const direct = window.__satregAppToken;
+      if (typeof direct === 'string' && direct) return direct;
+    } catch (e) {}
+    for (const storeName of ['sessionStorage', 'localStorage']) {
+      try {
+        const store = window[storeName];
+        if (!store || typeof store.getItem !== 'function') continue;
+        const raw = store.getItem('appToken');
+        if (!raw) continue;
+        let value = raw;
+        try {
+          const parsed = JSON.parse(raw);
+          value = parsed && typeof parsed === 'object' && 'localState' in parsed ? parsed.localState : parsed;
+        } catch (e) { /* 站点也可能直接存字符串 */ }
+        if (typeof value === 'string' && value) return value;
+      } catch (e) {}
+    }
+    return '';
+  };
+  // 回传前递归剔除 appToken；结构无法识别时也只把脱敏后的数据交给 Node 进程。
+  const stripPageTokens = value => {
+    if (Array.isArray(value)) return value.map(stripPageTokens);
+    if (value && typeof value === 'object') {
+      const copy = {};
+      for (const key of Object.keys(value)) {
+        if (key.toLowerCase() === 'apptoken') continue;
+        copy[key] = stripPageTokens(value[key]);
+      }
+      return copy;
+    }
+    return value;
+  };
   const encoder = new TextEncoder();
   const toHex = bytes =>
     Array.from(new Uint8Array(bytes)).map(b => b.toString(16).padStart(2, '0')).join('');
@@ -66,10 +109,12 @@ async function inPageSearchRequest(options) {
   // 官网每轮响应可能换发 appToken，并把它追加到后续请求体。这里把最新值只存在页面 window 上，
   // 不跨进程回传、不写日志；页面重新加载后自然失效，再由捕获到的官网请求重新建立。
   let bodyToSend = opts.body && typeof opts.body === 'object' ? Object.assign({}, opts.body) : {};
-  try {
-    const pageToken = window.__satregAppToken;
-    if (typeof pageToken === 'string' && pageToken) bodyToSend.appToken = pageToken;
-  } catch (e) {}
+  // 官网 061_api 的 constructRequestBody 在未显式关闭 withAppToken 时，会给所有 POST
+  // （包括 upcoming-test-dates）追加当前 appToken；137_test-center 的 getAvailableTestDates
+  // 没有关闭该默认行为，所以两类请求都要在页面内补令牌。
+  // 令牌只从页面读取并写回页面，绝不出现在跨进程的 options/返回值里。
+  const pageToken = readPageAppToken();
+  if (pageToken) bodyToSend.appToken = pageToken;
   const payload = JSON.stringify(bodyToSend);
 
   if (opts.sign !== false) {
@@ -118,85 +163,174 @@ async function inPageSearchRequest(options) {
     }
   }
 
-  const controller = typeof AbortController === 'function' ? new AbortController() : null;
-  const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+  // 该接口只用 Catapult 头鉴权，不依赖 Cookie；而它的 CORS 预检返回
+  // `Access-Control-Allow-Origin: *` + `Allow-Credentials: true`，浏览器在
+  // credentials:'include' 时会直接拒绝这种组合（表现为 Failed to fetch）。
+  // 所以默认 omit；若服务端确实要求凭据，再回退 include 试一次。
+  const sendRequest = async credentials => {
+    const controller = typeof AbortController === 'function' ? new AbortController() : null;
+    const timer = controller ? setTimeout(() => controller.abort(), timeoutMs) : null;
+    try {
+      return await fetch(url, {
+        method: 'POST',
+        headers,
+        body: payload,
+        credentials,
+        mode: 'cors',
+        signal: controller ? controller.signal : undefined
+      });
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  };
   try {
-    const response = await fetch(url, {
-      method: 'POST',
-      headers,
-      body: payload,
-      credentials: 'include',
-      mode: 'cors',
-      signal: controller ? controller.signal : undefined
-    });
+    let response;
+    try {
+      response = await sendRequest('omit');
+    } catch (omitError) {
+      out.error = 'fetch:' + ((omitError && omitError.message) || omitError);
+      response = await sendRequest('include');
+      out.error = '';
+    }
     out.status = response.status;
     out.ok = !!response.ok;
     const text = await response.text();
     out.textLength = text.length;
     let parsed = null;
-    try { parsed = JSON.parse(text); } catch (e) { out.raw = String(text).slice(0, 300); }
+    try {
+      parsed = JSON.parse(text);
+    } catch (e) {
+      // 非 JSON 响应也只回传脱敏片段，避免把可能夹带的 appToken 带到 Node 进程。
+      out.raw = String(text).slice(0, 300).replace(/("?appToken"?\s*[:=]\s*"?)[^",}\s]+/gi, '$1[redacted]');
+    }
     if (parsed && typeof parsed === 'object') {
       if (typeof parsed.appToken === 'string' && parsed.appToken) {
         try { window.__satregAppToken = parsed.appToken; } catch (e) {}
       }
-      const list = Array.isArray(parsed.testCenters) ? parsed.testCenters
-        : (parsed.data && Array.isArray(parsed.data.testCenters)) ? parsed.data.testCenters
-        : Array.isArray(parsed.data) ? parsed.data
-        : Array.isArray(parsed) ? parsed : null;
-      if (list) {
-        // 只回传判定需要的字段，避免把整份响应（含 appToken）跨进程搬运。
-        out.centerCount = list.length;
-        out.data = {
-          testCenters: list.map(center => {
-            if (!center || typeof center !== 'object') return {};
-            const admins = Array.isArray(center.admins) ? center.admins : [];
-            const admin = admins[0] && typeof admins[0] === 'object' ? admins[0] : null;
-            return {
-              tcCd: center.tcCd,
-              tcName: center.tcName,
-              tcAdminStatus: center.tcAdminStatus,
-              admins: admin ? [{
-                seatAvailable: admin.seatAvailable,
-                tcAdminStatus: admin.tcAdminStatus,
-                eventStartTime: admin.eventStartTime,
-                tamTCAdminId: admin.tamTCAdminId,
-                asmtEventId: admin.asmtEventId,
-                totalCapacity: admin.totalCapacity,
-                totalReservedCap: admin.totalReservedCap
-              }] : []
-            };
-          })
-        };
+      if (kind === 'upcoming-test-dates') {
+        const dates = Array.isArray(parsed.upcomingSATTestDates) ? parsed.upcomingSATTestDates
+          : (parsed.data && Array.isArray(parsed.data.upcomingSATTestDates)) ? parsed.data.upcomingSATTestDates
+          : Array.isArray(parsed.data) ? parsed.data
+          : Array.isArray(parsed) ? parsed : null;
+        if (dates) {
+          out.dateCount = dates.length;
+          // 只回传匹配考期需要的字段；appToken 只留在页面 window 上。
+          out.data = {
+            dates: dates.map(item => {
+              if (!item || typeof item !== 'object') return {};
+              const mapped = {
+                adminId: item.adminId,
+                testDate: item.testDate,
+                testDt: item.testDt,
+                alternateTestDt: item.alternateTestDt,
+                status: item.status,
+                asmtEventId: item.asmtEventId,
+                asmtId: item.asmtId,
+                registrationDeadlinePassed: item.registrationDeadlinePassed,
+                lateRegistrationDeadline: item.lateRegistrationDeadline
+              };
+              // ssdOptIn 是考期响应里的显式布尔值；只在确实给出时回传，
+              // 缺失时保持 undefined，让 Node 侧回退到捕获模板/任务设置。
+              if (typeof item.ssdOptIn === 'boolean') mapped.ssdOptIn = item.ssdOptIn;
+              return mapped;
+            })
+          };
+        } else {
+          out.data = stripPageTokens(parsed);
+        }
       } else {
-        out.data = parsed;
+        const list = Array.isArray(parsed.testCenters) ? parsed.testCenters
+          : (parsed.data && Array.isArray(parsed.data.testCenters)) ? parsed.data.testCenters
+          : Array.isArray(parsed.data) ? parsed.data
+          : Array.isArray(parsed) ? parsed : null;
+        if (list) {
+          // 只回传判定需要的字段，避免把整份响应（含 appToken）跨进程搬运。
+          out.centerCount = list.length;
+          out.data = {
+            testCenters: list.map(center => {
+              if (!center || typeof center !== 'object') return {};
+              const admins = Array.isArray(center.admins) ? center.admins : [];
+              const admin = admins[0] && typeof admins[0] === 'object' ? admins[0] : null;
+              return {
+                tcCd: center.tcCd,
+                tcName: center.tcName,
+                tcAdminStatus: center.tcAdminStatus,
+                admins: admin ? [{
+                  seatAvailable: admin.seatAvailable,
+                  tcAdminStatus: admin.tcAdminStatus,
+                  eventStartTime: admin.eventStartTime,
+                  tamTCAdminId: admin.tamTCAdminId,
+                  asmtEventId: admin.asmtEventId,
+                  totalCapacity: admin.totalCapacity,
+                  totalReservedCap: admin.totalReservedCap
+                }] : []
+              };
+            })
+          };
+        } else {
+          out.data = stripPageTokens(parsed);
+        }
       }
     }
   } catch (e) {
     out.error = 'fetch:' + ((e && e.message) || e);
-  } finally {
-    if (timer) clearTimeout(timer);
   }
   return out;
 }
 
-// 在已登录页面里调用查位接口。返回结构固定，调用方不需要再解析页面异常。
-async function searchTestCenterAdmins(page, options = {}) {
+// 页面上下文里只回答「当前是否已有 appToken」，不把令牌回传。
+function inPageHasAppToken() {
+  try {
+    const direct = window.__satregAppToken;
+    if (typeof direct === 'string' && direct) return true;
+  } catch (e) {}
+  for (const storeName of ['sessionStorage', 'localStorage']) {
+    try {
+      const store = window[storeName];
+      if (!store || typeof store.getItem !== 'function') continue;
+      const raw = store.getItem('appToken');
+      if (!raw) continue;
+      let value = raw;
+      try {
+        const parsed = JSON.parse(raw);
+        value = parsed && typeof parsed === 'object' && 'localState' in parsed ? parsed.localState : parsed;
+      } catch (e) {}
+      if (typeof value === 'string' && value) return true;
+    } catch (e) {}
+  }
+  return false;
+}
+
+// 缓存命中时确认页面仍持有 appToken：缺失就重新拉考期，避免拿旧缓存发出不带令牌的查位请求。
+async function hasPageAppToken(page) {
+  if (!page || typeof page.evaluate !== 'function') return false;
+  try {
+    return await withTimeout(page.evaluate(inPageHasAppToken), 3000, '读取页面 appToken 超时') === true;
+  } catch (e) {
+    return false;
+  }
+}
+
+// 在已登录页面里调用官网只读接口。返回结构固定，调用方不需要再解析页面异常。
+async function callPageApi(page, options, kind, label) {
   if (!page || typeof page.evaluate !== 'function') return { ok: false, error: '没有可用的活动页面' };
-  if (!options.body || typeof options.body !== 'object') return { ok: false, error: '缺少查位请求体' };
+  if (!options || !options.body || typeof options.body !== 'object') return { ok: false, error: '缺少请求体' };
   const timeoutMs = Number(options.timeoutMs) || 15000;
   const startedAt = Date.now();
+  const isDates = kind === 'upcoming-test-dates';
   let raw;
   try {
-    raw = await withTimeout(page.evaluate(inPageSearchRequest, {
-      url: options.url || DEFAULT_SEARCH_URL,
+    raw = await withTimeout(page.evaluate(inPageApiRequest, {
+      kind,
+      url: options.url || (isDates ? DEFAULT_UPCOMING_DATES_URL : DEFAULT_SEARCH_URL),
       body: options.body,
       withAuth: options.withAuth !== false,
       sign: options.sign !== false,
-      directory: options.directory || DIRECTORY,
+      directory: options.directory || (isDates ? UPCOMING_DIRECTORY : DIRECTORY),
       region: options.region || REGION,
       service: options.service || SERVICE,
       timeoutMs
-    }), timeoutMs + 5000, '页面内查位请求超时');
+    }), timeoutMs + 5000, '页面内' + label + '请求超时');
   } catch (error) {
     return { ok: false, error: String((error && error.message) || error).split('\n')[0], durationMs: Date.now() - startedAt };
   }
@@ -206,9 +340,14 @@ async function searchTestCenterAdmins(page, options = {}) {
     signed: !!(raw && raw.signed),
     authMode: (raw && raw.authMode) || '',
     error: (raw && raw.error) || '',
-    centerCount: Number(raw && raw.centerCount) || 0,
     durationMs: Date.now() - startedAt
   };
+  if (isDates) {
+    result.dateCount = Number(raw && raw.dateCount) || 0;
+    result.dates = raw && raw.data && Array.isArray(raw.data.dates) ? raw.data.dates : null;
+  } else {
+    result.centerCount = Number(raw && raw.centerCount) || 0;
+  }
   if (raw && raw.data && typeof raw.data === 'object') result.data = raw.data;
   else if (raw && raw.raw) result.snippet = String(raw.raw).slice(0, 300);
   if (!result.ok && !result.error) {
@@ -216,6 +355,19 @@ async function searchTestCenterAdmins(page, options = {}) {
     result.error = body.message || body.errorMessage || body.error || ('HTTP ' + result.status);
   }
   return result;
+}
+
+async function searchTestCenterAdmins(page, options = {}) {
+  return callPageApi(page, options, 'search', '查位');
+}
+
+// 拉取目标地区的可用考期；响应里的 asmtEventId 是查位请求的必需参数。
+async function upcomingTestDates(page, options = {}) {
+  const body = options.body && typeof options.body === 'object'
+    ? options.body
+    : buildUpcomingDatesBody(options);
+  if (!body) return { ok: false, error: '缺少考期请求体' };
+  return callPageApi(page, Object.assign({}, options, { body }), 'upcoming-test-dates', '考期');
 }
 
 // 响应里的考点数组层级不固定，统一在这里取。
@@ -266,7 +418,7 @@ function matchesTarget(center, target) {
 }
 
 // 把接口结果映射成引擎现有的 available / unavailable / unknown 三种状态。
-function matchAvailability(centers, targets) {
+function matchAvailability(centers, targets, options = {}) {
   const list = (Array.isArray(centers) ? centers : []).filter(center => center && typeof center === 'object');
   if (!list.length) {
     // 空列表几乎总是「查询条件不对」（asmtEventId 过期等），不是「全国无考点」。
@@ -277,6 +429,18 @@ function matchAvailability(centers, targets) {
   const matched = wanted.length ? list.filter(center => wanted.some(target => matchesTarget(center, target))) : list;
   if (!matched.length) {
     return { status: 'unknown', matchedCount: 0, availableCount: 0, reason: '接口结果中未找到目标考点' };
+  }
+  // asmtEventId 过期时接口可能返回另一场考试的考点；eventStartTime 对不上就不采信。
+  const wantedDate = dateOnly(options.targetDate);
+  if (wantedDate) {
+    const mismatched = matched.some(center => {
+      const admin = adminFor(center);
+      const eventDate = dateOnly(admin && admin.eventStartTime);
+      return eventDate && eventDate !== wantedDate;
+    });
+    if (mismatched) {
+      return { status: 'unknown', matchedCount: matched.length, availableCount: 0, reason: '接口返回的考点考期与目标日期不一致' };
+    }
   }
   const available = matched.filter(center => centerAvailability(center).available);
   if (available.length) {
@@ -325,8 +489,9 @@ function buildSearchBody(options) {
     ssdOptIn: opts.ssdOptIn === true,
     isSimpleSearch: true
   };
-  if (opts.srcAppId != null && opts.srcAppId !== '') body.srcAppId = Number(opts.srcAppId);
-  if (opts.appToken) body.appToken = opts.appToken;
+  const srcAppId = opts.srcAppId == null || opts.srcAppId === '' ? DEFAULT_SRC_APP_ID : Number(opts.srcAppId);
+  if (Number.isFinite(srcAppId)) body.srcAppId = srcAppId;
+  // appToken 不在这里拼装：它只由页面上下文在发送前注入。
   return body;
 }
 
@@ -344,10 +509,8 @@ function pickSearchTemplate(postData) {
     tcAsmtId: Array.isArray(postData.tcAsmtId) ? postData.tcAsmtId.map(String) : null,
     ssdOptIn: postData.ssdOptIn === true,
     isSimpleSearch: postData.isSimpleSearch !== false,
-    srcAppId: postData.srcAppId,
-    // appToken 是官网自己从 upcoming-test-dates 拿到的会话级令牌，原生请求会带上。
-    // 只留在页面内存的模板里，不打印、不落盘、不跨进程传。
-    appToken: typeof postData.appToken === 'string' ? postData.appToken : ''
+    srcAppId: postData.srcAppId
+    // appToken 不进入模板：它由页面在发送前从 window / sessionStorage 读取并注入。
   };
   if (template.eventStartDt.length !== 10) template.eventStartDt = '';
   return template;
@@ -373,23 +536,152 @@ function buildReplayBody(template, task) {
     ssdOptIn: t.ssdOptIn === true,
     isSimpleSearch: true
   };
-  if (t.srcAppId != null && t.srcAppId !== '') body.srcAppId = Number(t.srcAppId);
-  if (t.appToken) body.appToken = t.appToken;
+  const srcAppId = t.srcAppId == null || t.srcAppId === '' ? DEFAULT_SRC_APP_ID : Number(t.srcAppId);
+  if (Number.isFinite(srcAppId)) body.srcAppId = srcAppId;
+  // appToken 不在这里拼装：它只由页面上下文在发送前注入。
   return body;
+}
+
+const MONTH_NAMES = {
+  january: 1, february: 2, march: 3, april: 4, may: 5, june: 6,
+  july: 7, august: 8, september: 9, october: 10, november: 11, december: 12
+};
+
+// 把 ISO、斜杠日期和官网展示日期统一成 YYYY-MM-DD；无法识别时返回空串。
+function dateOnly(value) {
+  const text = String(value == null ? '' : value).trim();
+  if (!text) return '';
+  let match = text.match(/^(\d{4})[-/](\d{1,2})[-/](\d{1,2})/);
+  if (match) return match[1] + '-' + match[2].padStart(2, '0') + '-' + match[3].padStart(2, '0');
+  match = text.match(/^(\d{1,2})[-/](\d{1,2})[-/](\d{4})/);
+  if (match) return match[3] + '-' + match[1].padStart(2, '0') + '-' + match[2].padStart(2, '0');
+  match = text.match(/^([A-Za-z]+)\s+(\d{1,2}),?\s+(\d{4})/);
+  if (match) {
+    const month = MONTH_NAMES[match[1].toLowerCase()];
+    if (month) return match[3] + '-' + String(month).padStart(2, '0') + '-' + match[2].padStart(2, '0');
+  }
+  return '';
+}
+
+function extractUpcomingDates(payload) {
+  if (!payload || typeof payload !== 'object') return [];
+  const list = Array.isArray(payload) ? payload
+    : Array.isArray(payload.upcomingSATTestDates) ? payload.upcomingSATTestDates
+    : Array.isArray(payload.dates) ? payload.dates
+    : payload.data && Array.isArray(payload.data.upcomingSATTestDates) ? payload.data.upcomingSATTestDates
+    : payload.data && Array.isArray(payload.data.dates) ? payload.data.dates
+    : payload.data && Array.isArray(payload.data) ? payload.data
+    : [];
+  return list.filter(item => item && typeof item === 'object');
+}
+
+// 考期对象只保留匹配与下单需要的字段，绝不透传 appToken。
+// ssdOptIn 只在响应显式给出布尔值时才保留；缺失/非布尔一律 undefined，
+// 让调用方能回退到捕获模板或任务设置，而不是被误判成 false。
+function sanitizeUpcomingOption(item) {
+  const option = {
+    adminId: item.adminId,
+    testDate: item.testDate,
+    testDt: item.testDt,
+    alternateTestDt: item.alternateTestDt,
+    status: item.status,
+    asmtEventId: item.asmtEventId,
+    asmtId: item.asmtId,
+    registrationDeadlinePassed: item.registrationDeadlinePassed,
+    lateRegistrationDeadline: item.lateRegistrationDeadline
+  };
+  if (typeof item.ssdOptIn === 'boolean') option.ssdOptIn = item.ssdOptIn;
+  return option;
+}
+
+// 目标任务日期必须命中带有效 asmtEventId 的考期；
+// 官网前端（137_test-center 的 Ua）只在 status === 'Y' 时认为该日期可报名，
+// 因此显式非 'Y' 一律排除；status 缺失时无法判断，只在同一天没有 'Y' 条目时才作为兜底候选，
+// 以免响应字段变化时把「还能报名」误判成「不能报名」。
+// 常规日期优先于 alternateTestDt（周日考试兜底），'Y' 优先于缺失 status。
+function pickTestDateOption(payload, targetDate) {
+  const target = dateOnly(targetDate);
+  if (!target) return null;
+  let best = null;
+  for (const item of extractUpcomingDates(payload)) {
+    const status = item.status == null ? '' : String(item.status).toUpperCase();
+    if (status && status !== 'Y') continue;
+    const eventId = Number(item.asmtEventId);
+    if (!Number.isFinite(eventId) || eventId <= 0) continue;
+    const primary = dateOnly(item.testDate || item.testDt);
+    const alternate = dateOnly(item.alternateTestDt);
+    let match = '';
+    if (primary === target) match = 'testDate';
+    else if (alternate === target) match = 'alternateTestDt';
+    if (!match) continue;
+    const rank = (match === 'testDate' ? 2 : 0) + (status === 'Y' ? 1 : 0);
+    if (!best || rank > best.rank) best = { match, item, rank };
+  }
+  if (!best) return null;
+  const option = sanitizeUpcomingOption(best.item);
+  return {
+    date: target,
+    match: best.match,
+    adminId: option.adminId,
+    asmtEventId: Number(option.asmtEventId),
+    asmtId: option.asmtId,
+    ssdOptIn: option.ssdOptIn,
+    option
+  };
+}
+
+// 对应 137_test-center 的 es(): { isUSDomesticInd, ...typeCodes, ssdOptIn }。
+function buildUpcomingDatesBody(options) {
+  const opts = options || {};
+  const country = String(opts.countryCode || opts.country || '').trim().toUpperCase();
+  if (!/^[A-Z]{2}$/.test(country)) return null;
+  return {
+    isUSDomesticInd: country === 'US' ? 'Y' : 'N',
+    asmtFamilyCd: opts.asmtFamilyCd == null ? 1 : Number(opts.asmtFamilyCd),
+    asmtSubtypeCd: opts.asmtSubtypeCd == null ? 2 : Number(opts.asmtSubtypeCd),
+    ssdOptIn: opts.ssdOptIn === true
+  };
+}
+
+// 捕获官网原生考期请求时只保留类型字段，用于校验与复用；不保留 appToken。
+function pickUpcomingDatesTemplate(postData) {
+  if (!postData || typeof postData !== 'object' || Array.isArray(postData)) return null;
+  const family = Number(postData.asmtFamilyCd);
+  const subtype = Number(postData.asmtSubtypeCd);
+  if (!Number.isFinite(family) || !Number.isFinite(subtype)) return null;
+  return {
+    isUSDomesticInd: postData.isUSDomesticInd === 'Y' || postData.isUSDomesticInd === true ? 'Y' : 'N',
+    asmtFamilyCd: family,
+    asmtSubtypeCd: subtype,
+    ssdOptIn: postData.ssdOptIn === true
+  };
 }
 
 module.exports = {
   DEFAULT_SEARCH_URL,
+  DEFAULT_UPCOMING_DATES_URL,
   DIRECTORY,
+  UPCOMING_DIRECTORY,
   REGION,
   SERVICE,
-  inPageSearchRequest,
+  DEFAULT_SRC_APP_ID,
+  inPageApiRequest,
+  inPageHasAppToken,
+  hasPageAppToken,
+  inPageSearchRequest: inPageApiRequest,
   searchTestCenterAdmins,
+  upcomingTestDates,
   extractTestCenters,
+  extractUpcomingDates,
   testCenterList,
   matchAvailability,
   centerAvailability,
   buildSearchBody,
   pickSearchTemplate,
-  buildReplayBody
+  buildReplayBody,
+  dateOnly,
+  pickTestDateOption,
+  buildUpcomingDatesBody,
+  pickUpcomingDatesTemplate
 };
+

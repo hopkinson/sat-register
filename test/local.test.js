@@ -138,11 +138,12 @@ test('query retries the same search when the first response renders no cards', a
   assert.ok(logs.some(message => /重试同一查询/.test(message)), logs.join('|'));
 });
 
-function loadEngine(browserDriver = chromium, settings = { satAccount: 'global@example.invalid', satPassword: 'fixture-global' }, queryFixture) {
+function loadEngine(browserDriver = chromium, settings = { satAccount: 'global@example.invalid', satPassword: 'fixture-global' }, queryFixture, apiFixture, timers = {}) {
   const module = { exports: {} };
-  vm.runInNewContext(engineSource + '\nmodule.exports.solveHCaptcha = solveHCaptchaOnce; module.exports.clickWizardControl = clickWizardControl;\nif (queryFixture) queryTestCenters = queryFixture; module.exports.wizard = handleRegistrationWizardPrerequisites; module.exports.inspectCenters = inspectTestCenters; module.exports.queryCenters = queryTestCenters; module.exports.selectDate = ensureOnTestCenterSearchForm; module.exports.postSelection = handlePostLockProcess; module.exports.attemptSelection = attemptSelection; module.exports.solveCaptcha = solveCaptchaOnce; module.exports.extractArkosePublicKey = extractArkosePublicKey; module.exports.queryCentersViaApi = queryTestCentersViaApi; module.exports.watchAdmins = watchTestCenterAdmins;', {
+  vm.runInNewContext(engineSource + '\nmodule.exports.solveHCaptcha = solveHCaptchaOnce; module.exports.clickWizardControl = clickWizardControl;\nif (queryFixture) queryTestCenters = queryFixture;\nif (apiFixture) queryTestCentersViaApi = apiFixture;\nmodule.exports.wizard = handleRegistrationWizardPrerequisites; module.exports.inspectCenters = inspectTestCenters; module.exports.queryCenters = queryTestCenters; module.exports.selectDate = ensureOnTestCenterSearchForm; module.exports.postSelection = handlePostLockProcess; module.exports.attemptSelection = attemptSelection; module.exports.solveCaptcha = solveCaptchaOnce; module.exports.extractArkosePublicKey = extractArkosePublicKey; module.exports.queryCentersViaApi = queryTestCentersViaApi; module.exports.decidePollAction = decidePollAction; module.exports.watchAdmins = watchTestCenterAdmins;', {
     module, require: name => name === 'playwright' ? { chromium: browserDriver } : name === 'fs' ? { ...fs, existsSync: file => file === path.join(os.tmpdir(), 'data', 'db.json'), readFileSync: () => JSON.stringify({ settings }) } : require(name === './yescaptcha-solver' || name === './satreg-api-client' ? path.join(root, name) : name),
-    queryFixture, __dirname: os.tmpdir(), process: { env: {} }, console, setTimeout, clearTimeout, queueMicrotask, Date, URL
+    queryFixture, apiFixture, __dirname: os.tmpdir(), process: { env: {} }, console, setTimeout: timers.setTimeout || setTimeout,
+    clearTimeout: timers.clearTimeout || clearTimeout, queueMicrotask, Date, URL
   });
   return module.exports;
 }
@@ -1189,6 +1190,63 @@ test('hCaptcha accepts the official React fingerprint when the SDK response is h
   } finally { await page.close(); }
 });
 
+test('hCaptcha challenge auto-click: classifies cells and clicks targets', async t => {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const solver = require(path.join(root, 'yescaptcha-solver'));
+  const origClassify = solver.classifyHCaptcha;
+  const origSolve = solver.solveHCaptcha;
+  let classified = false;
+  solver.solveHCaptcha = async () => 'fixture-token';
+  solver.classifyHCaptcha = async ({ question, queries }) => {
+    classified = true;
+    assert.match(question, /motorcycle/);
+    assert.equal(queries.length, 2);
+    return [true, false];
+  };
+  t.after(() => {
+    solver.classifyHCaptcha = origClassify;
+    solver.solveHCaptcha = origSolve;
+  });
+
+  const page = await browser.newPage();
+  try {
+    await page.route('https://newassets.hcaptcha.com/**', route => route.fulfill({ contentType: 'text/html', body: '<!DOCTYPE html><html><body></body></html>' }));
+    await page.setContent('<button id="test-details-continue-button" disabled>Continue</button>' +
+      '<iframe id="cframe" src="https://newassets.hcaptcha.com/widget?frame=challenge&sitekey=fixture-sitekey"></iframe>');
+    const frame = page.frame({ url: /frame=challenge/ });
+    await frame.setContent('<div class="prompt-text">Please click motorcycle</div>' +
+      '<div class="task-image" id="cell0">1</div>' +
+      '<div class="task-image" id="cell1">2</div>' +
+      '<button class="button-submit">Verify</button>');
+
+    await page.evaluate(() => {
+      window.addEventListener('message', () => {
+        document.getElementById('test-details-continue-button').disabled = false;
+        window.hcaptcha = { getResponse: () => 'fixture-sdk-response' };
+        const cf = document.getElementById('cframe');
+        if (cf) cf.remove();
+      });
+    });
+
+    await frame.locator('#cell0').evaluate(el => {
+      el.addEventListener('click', () => { window.__cell0Clicked = true; });
+    });
+    await frame.locator('.button-submit').evaluate(el => {
+      el.addEventListener('click', () => {
+        window.parent.postMessage('verified', '*');
+      });
+    });
+
+    const engine = loadEngine({}, { yescaptchaKey: 'fixture-key' });
+    const logs = [];
+    const result = await engine.solveHCaptcha(page, msg => logs.push(msg));
+    assert.equal(result.solved, true, JSON.stringify({ result, logs }));
+    assert.equal(classified, true);
+    assert.match(result.detail, /自动识别并点击通过/);
+  } finally { await page.close(); }
+});
+
 test('selection does not submit while hCaptcha is unresolved even if Continue is enabled', async t => {
   const browser=await chromium.launch({headless:true});
   t.after(()=>browser.close());
@@ -1396,21 +1454,27 @@ test('api client: replay body is rebuilt from the captured official request only
   });
   assert.equal(captured.eventStartDt, '2026-12-05');
   assert.equal(captured.tcCountryISOCode, 'HK');
-  assert.equal(captured.appToken, 'session-token-not-logged');
+  assert.equal(captured.appToken, undefined, 'captured templates must not carry appToken into Node');
   const body = satregApi.buildReplayBody(captured, { targetDate: '2026-12-05', targetCountryCode: 'HK' });
   assert.equal(body.asmtEventId, 12345);
   assert.deepEqual(body.tcAsmtId, ['99']);
-  assert.equal(body.appToken, 'session-token-not-logged');
+  assert.equal(body.appToken, undefined, 'appToken is injected only inside the page');
+  assert.equal(body.srcAppId, 115, 'captured template without srcAppId falls back to the official appId');
+  const explicit = satregApi.pickSearchTemplate({ asmtEventId: 9, eventStartDt: '2026-12-05', tcCountryISOCode: 'HK', srcAppId: 115 });
+  assert.equal(satregApi.buildReplayBody(explicit, { targetDate: '2026-12-05', targetCountryCode: 'HK' }).srcAppId, 115);
   assert.equal(satregApi.buildReplayBody(captured, { targetDate: '2027-03-06', targetCountryCode: 'HK' }), null);
   assert.equal(satregApi.buildReplayBody(captured, { targetDate: '2026-12-05' }), null);
   assert.equal(satregApi.pickSearchTemplate({ eventStartDt: '2026-12-05' }), null);
   assert.equal(satregApi.buildSearchBody({ eventStartDt: '2026-12-05', countryCode: 'HK' }), null);
-  assert.equal(satregApi.buildSearchBody({ eventStartDt: '2026-12-05', countryCode: 'HK', asmtEventId: 7 }).asmtEventId, 7);
+  const fallback = satregApi.buildSearchBody({ eventStartDt: '2026-12-05', countryCode: 'HK', asmtEventId: 7 });
+  assert.equal(fallback.asmtEventId, 7);
+  assert.equal(fallback.srcAppId, 115, 'search body must carry the official srcAppId');
+  assert.equal(satregApi.buildSearchBody({ eventStartDt: '2026-12-05', countryCode: 'HK', asmtEventId: 7, srcAppId: 116 }).srcAppId, 116);
   assert.equal(satregApi.testCenterList({ message: 'expired' }), null);
   assert.deepEqual(satregApi.testCenterList({ testCenters: [] }), []);
 });
 
-test('api query: template capture keeps appToken in memory and replay maps the official payload', async () => {
+test('api query: template capture never carries appToken and replay maps the official payload', async () => {
   const engine = loadEngine();
   const page = new EventEmitter();
   const context = new EventEmitter();
@@ -1422,7 +1486,7 @@ test('api query: template capture keeps appToken in memory and replay maps the o
   request.url = () => 'https://satreg-api.collegeboard.org/msregadmintestcenter-prod/student/search-test-center-admins';
   request.postDataJSON = () => ({ asmtEventId: 77, eventStartDt: '2026-12-05', tcCountryISOCode: 'HK', appToken: 'memory-only' });
   page.emit('request', request);
-  assert.equal(page.__satregSearchTemplate.appToken, 'memory-only');
+  assert.equal(page.__satregSearchTemplate.appToken, undefined, 'appToken must stay in the page, not the template');
 
   let sent = null;
   page.evaluate = async (fn, options) => {
@@ -1437,7 +1501,7 @@ test('api query: template capture keeps appToken in memory and replay maps the o
   assert.equal(result.source, 'api');
   assert.equal(result.authMode, 'sigv4');
   assert.equal(sent.body.asmtEventId, 77);
-  assert.equal(sent.body.appToken, 'memory-only');
+  assert.equal(sent.body.appToken, undefined, 'cross-process body must not carry appToken');
   assert.equal(sent.body.tcCountryISOCode, 'HK');
   stop();
   assert.equal(page.listenerCount('request'), 0);
@@ -1445,8 +1509,392 @@ test('api query: template capture keeps appToken in memory and replay maps the o
 
   const noTemplate = new EventEmitter();
   noTemplate.url = () => 'https://satreg.collegeboard.org/register/testCenterSearch';
+  noTemplate.evaluate = async () => ({ ok: false, status: 500, error: 'fixture-failure' });
   const missing = await engine.queryCentersViaApi(noTemplate, { targetDate: '2026-12-05', targetCountryCode: 'HK' }, ['62250']);
   assert.equal(missing.status, 'unknown');
+  assert.match(missing.reason, /考期接口未成功/);
   noTemplate.url = () => 'https://example.invalid/';
   assert.match((await engine.queryCentersViaApi(noTemplate, {}, [])).reason, /不在报名官网域/);
+});
+
+test('api client: upcoming test dates parse only selectable target dates', () => {
+  const payload = { upcomingSATTestDates: [
+    { adminId: 1, testDate: 'December 5, 2026', testDt: '2026-12-05T00:00:00', status: 'Y', asmtEventId: 301, asmtId: 99 },
+    { adminId: 2, testDate: 'December 5, 2026', testDt: '2026-12-05T00:00:00', status: 'N', asmtEventId: 302, asmtId: 99 },
+    { adminId: 3, testDate: 'March 6, 2027', testDt: '2027-03-06T00:00:00', status: 'Y', asmtId: 99 },
+    { adminId: 4, testDate: 'May 1, 2027', testDt: '2027-05-01T00:00:00', status: 'Y', asmtEventId: 304, asmtId: 99 }
+  ] };
+  assert.equal(satregApi.extractUpcomingDates(payload).length, 4);
+  assert.equal(satregApi.extractUpcomingDates({ data: { upcomingSATTestDates: payload.upcomingSATTestDates } }).length, 4);
+  assert.equal(satregApi.extractUpcomingDates(null).length, 0);
+  const picked = satregApi.pickTestDateOption(payload, '2026-12-05');
+  assert.equal(picked.asmtEventId, 301, 'only status Y entries are selectable');
+  assert.equal(picked.match, 'testDate');
+  assert.equal(picked.option.testDt, '2026-12-05T00:00:00');
+  assert.equal(satregApi.pickTestDateOption(payload, '2027-03-06'), null, 'missing asmtEventId is not usable');
+  const noSsd = satregApi.pickTestDateOption({ dates: [
+    { testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99 }
+  ] }, '2026-12-05');
+  assert.equal(noSsd.ssdOptIn, undefined, 'missing ssdOptIn must stay unknown so callers can fall back');
+  assert.equal(noSsd.option.ssdOptIn, undefined);
+  const explicitSsd = satregApi.pickTestDateOption({ dates: [
+    { testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99, ssdOptIn: true }
+  ] }, '2026-12-05');
+  assert.equal(explicitSsd.ssdOptIn, true);
+  assert.equal(satregApi.pickTestDateOption(payload, '2027-01-01'), null);
+  assert.equal(satregApi.pickTestDateOption(payload, ''), null);
+  const alternate = satregApi.pickTestDateOption({ dates: [
+    { testDate: '2026-12-05T00:00:00', alternateTestDt: '2026-12-06T00:00:00', status: 'Y', asmtEventId: 401 }
+  ] }, '2026-12-06');
+  assert.equal(alternate.match, 'alternateTestDt');
+  assert.equal(alternate.asmtEventId, 401);
+  const preferred = satregApi.pickTestDateOption({ dates: [
+    { testDate: '2026-12-04T00:00:00', alternateTestDt: '2026-12-05T00:00:00', status: 'Y', asmtEventId: 402 },
+    { testDate: '2026-12-05T00:00:00', status: 'Y', asmtEventId: 403 }
+  ] }, '2026-12-05');
+  assert.equal(preferred.asmtEventId, 403, 'primary date beats alternate match');
+  assert.equal(satregApi.dateOnly('2026/1/5'), '2026-01-05');
+  assert.equal(satregApi.dateOnly('December 5, 2026'), '2026-12-05');
+  assert.equal(satregApi.dateOnly('not a date'), '');
+  assert.deepEqual(satregApi.buildUpcomingDatesBody({ countryCode: 'hk' }),
+    { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false });
+  assert.deepEqual(satregApi.buildUpcomingDatesBody({ countryCode: 'US' }),
+    { isUSDomesticInd: 'Y', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false });
+  assert.equal(satregApi.buildUpcomingDatesBody({ countryCode: '' }), null);
+  assert.deepEqual(satregApi.pickUpcomingDatesTemplate({ isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false, appToken: 'drop-me' }),
+    { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false });
+});
+
+test('api client: availability rejects centers from another test date', () => {
+  const center = (eventStartTime) => ({ tcCd: '62250', tcName: 'Zone A', admins: [{ seatAvailable: true, eventStartTime }] });
+  assert.equal(satregApi.matchAvailability([center('2026-12-05T08:00:00')], ['62250'], { targetDate: '2026-12-05' }).status, 'available');
+  const stale = satregApi.matchAvailability([center('2027-03-06T08:00:00')], ['62250'], { targetDate: '2026-12-05' });
+  assert.equal(stale.status, 'unknown');
+  assert.match(stale.reason, /考期/);
+});
+
+test('api client: appToken is injected inside the page for both date and search requests', async () => {
+  const calls = [];
+  const replies = [
+    { appToken: 'rotated-1', upcomingSATTestDates: [
+      { testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99 }
+    ] },
+    { appToken: 'rotated-2', testCenters: [
+      { tcCd: '62250', tcName: 'Zone A', admins: [{ seatAvailable: true }] }
+    ] }
+  ];
+  const store = {
+    value: JSON.stringify({ localState: 'session-token-1' }),
+    getItem(key) { return key === 'appToken' ? this.value : null; }
+  };
+  const window = { sessionStorage: store, localStorage: { getItem: () => null } };
+  const sandbox = {
+    window,
+    fetch: async (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, status: 200, text: async () => JSON.stringify(replies.shift()) };
+    },
+    TextEncoder, AbortController, setTimeout, clearTimeout
+  };
+  const inPage = vm.runInNewContext('(' + satregApi.inPageApiRequest.toString() + ')', sandbox);
+
+  const dates = await inPage({
+    kind: 'upcoming-test-dates', url: satregApi.DEFAULT_UPCOMING_DATES_URL,
+    body: { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false },
+    withAuth: false, sign: false
+  });
+  assert.equal(calls[0].body.appToken, 'session-token-1', 'date request reads the site sessionStorage token');
+  assert.equal(dates.ok, true);
+  assert.equal(dates.dateCount, 1);
+  assert.equal(window.__satregAppToken, 'rotated-1', 'rotated token is kept on the page');
+  assert(!JSON.stringify(dates).includes('rotated-1'));
+
+  const search = await inPage({
+    kind: 'search', url: satregApi.DEFAULT_SEARCH_URL,
+    body: { eventStartDt: '2026-12-05', tcCountryISOCode: 'HK', asmtEventId: 301 },
+    withAuth: false, sign: false
+  });
+  assert.equal(calls[1].body.appToken, 'rotated-1', 'search request reuses the token rotated in by the page');
+  assert.equal(search.ok, true);
+  assert.equal(window.__satregAppToken, 'rotated-2');
+  assert(!JSON.stringify(search).includes('rotated-1'));
+  assert(!JSON.stringify(search).includes('rotated-2'));
+  assert(!JSON.stringify(search).includes('appToken'));
+
+  // 页面刷新丢掉 window 副本后，仍能从站点自己的 sessionStorage 读回令牌。
+  delete window.__satregAppToken;
+  const hasToken = vm.runInNewContext('(' + satregApi.inPageHasAppToken.toString() + ')', sandbox);
+  assert.equal(hasToken(), true);
+  store.value = '';
+  assert.equal(hasToken(), false);
+});
+
+test('api client: in-page date parsing keeps an explicit ssdOptIn and drops it when absent', async () => {
+  const replies = [
+    { upcomingSATTestDates: [
+      { testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99, ssdOptIn: false },
+      { testDate: '2027-03-06', status: 'Y', asmtEventId: 302, asmtId: 99 }
+    ] },
+    { upcomingSATTestDates: [
+      { testDate: '2026-12-05', status: 'Y', asmtEventId: 303, asmtId: 99, ssdOptIn: true }
+    ] }
+  ];
+  const sandbox = {
+    window: { sessionStorage: { getItem: () => null }, localStorage: { getItem: () => null } },
+    fetch: async () => ({ ok: true, status: 200, text: async () => JSON.stringify(replies.shift()) }),
+    TextEncoder, AbortController, setTimeout, clearTimeout
+  };
+  const inPage = vm.runInNewContext('(' + satregApi.inPageApiRequest.toString() + ')', sandbox);
+  const options = { kind: 'upcoming-test-dates', url: satregApi.DEFAULT_UPCOMING_DATES_URL,
+    body: { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false }, withAuth: false, sign: false };
+
+  const first = await inPage(options);
+  assert.equal(first.dateCount, 2);
+  assert.equal(first.data.dates[0].ssdOptIn, false, 'explicit false must survive the in-page field mapping');
+  assert.equal('ssdOptIn' in first.data.dates[1], false, 'absent ssdOptIn must stay absent so callers can fall back');
+
+  const second = await inPage(options);
+  assert.equal(second.data.dates[0].ssdOptIn, true, 'explicit true must survive the in-page field mapping');
+});
+
+test('api client: an explicit date-level ssdOptIn reaches the search body end to end', async () => {
+  const engine = loadEngine();
+  const page = new EventEmitter();
+  page.url = () => 'https://satreg.collegeboard.org/register/testCenterSearch';
+  page.__satregUpcomingDatesTemplate = { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: true };
+  const sent = [];
+  const inPageBodies = [];
+  // 只伪造 fetch 响应：页面内的字段裁剪与请求体构造都走真实代码。
+  page.evaluate = async (fn, options) => {
+    if (!options) return true;
+    sent.push(options);
+    const sandbox = {
+      window: {
+        sessionStorage: { getItem: () => null },
+        localStorage: { getItem: () => null },
+        cb: { core: { iam: { getJWTToken: () => 'fixture-jwt' } } }
+      },
+      fetch: async (url, init) => {
+        inPageBodies.push(JSON.parse(init.body));
+        const payload = options.kind === 'upcoming-test-dates'
+          ? { upcomingSATTestDates: [{ testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99, ssdOptIn: false }] }
+          : { testCenters: [{ tcCd: '62250', tcName: 'Zone A', admins: [{ seatAvailable: false, tcAdminStatus: 'Open' }] }] };
+        return { ok: true, status: 200, text: async () => JSON.stringify(payload) };
+      },
+      TextEncoder, AbortController, setTimeout, clearTimeout
+    };
+    const raw = await vm.runInNewContext('(' + satregApi.inPageApiRequest.toString() + ')', sandbox)(options);
+    const dates = raw && raw.data && Array.isArray(raw.data.dates) ? raw.data.dates : null;
+    return Object.assign({}, raw, { dates });
+  };
+  const result = await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK', ssdOptIn: true }, ['62250']);
+  assert.equal(result.status, 'unavailable', JSON.stringify(result));
+  assert.equal(inPageBodies[0].ssdOptIn, true, 'dates request uses the captured template value');
+  assert.equal(inPageBodies[1].ssdOptIn, false, 'explicit date-level ssdOptIn overrides the captured template');
+});
+
+test('api query: without a captured search template it fetches test dates then searches and caches them', async () => {
+  const engine = loadEngine();
+  const page = new EventEmitter();
+  page.url = () => 'https://satreg.collegeboard.org/register/testCenterSearch';
+  const calls = [];
+  let pageHasToken = true;
+  page.evaluate = async (fn, options) => {
+    if (!options) return pageHasToken; // cached-path appToken presence probe
+    calls.push(options);
+    if (options.kind === 'upcoming-test-dates') {
+      return { ok: true, status: 200, signed: true, authMode: 'sigv4', dateCount: 2, data: { dates: [
+        { adminId: 1, testDate: '2026-12-05', testDt: '2026-12-05T00:00:00', status: 'Y', asmtEventId: 301, asmtId: 99 },
+        { adminId: 2, testDate: '2027-03-06', testDt: '2027-03-06T00:00:00', status: 'Y', asmtEventId: 302, asmtId: 99 }
+      ] } };
+    }
+    return { ok: true, status: 200, signed: true, authMode: 'sigv4', centerCount: 1,
+      data: { testCenters: [{ tcCd: '62250', tcName: 'Zone A', tcAdminStatus: 'Open',
+        admins: [{ seatAvailable: true, tcAdminStatus: 'Open', eventStartTime: '2026-12-05T08:00:00' }] }] } };
+  };
+
+  const result = await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK' }, ['62250']);
+  assert.equal(result.status, 'available', JSON.stringify(result));
+  assert.equal(result.dateSource, 'upcoming-test-dates');
+  assert.equal(result.asmtEventId, 301);
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].kind, 'upcoming-test-dates');
+  assert.deepEqual(calls[0].body, { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false });
+  assert.equal(calls[0].url, satregApi.DEFAULT_UPCOMING_DATES_URL);
+  assert.equal(calls[0].directory, 'msregrequest');
+  assert.equal(calls[1].kind, 'search');
+  assert.equal(calls[1].body.asmtEventId, 301);
+  assert.deepEqual(calls[1].body.tcAsmtId, ['99']);
+  assert.equal(calls[1].body.eventStartDt, '2026-12-05');
+  assert.equal(calls[1].body.tcCountryISOCode, 'HK');
+  assert.equal(calls[1].body.srcAppId, 115, 'two-step search body carries srcAppId');
+  assert.equal(page.__satregUpcomingDatesCache.key, 'HK|0');
+
+  // 第二轮：考期结果命中缓存，只再发一次查位请求。
+  calls.length = 0;
+  const again = await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK' }, ['62250']);
+  assert.equal(again.status, 'available');
+  assert.equal(again.dateSource, 'upcoming-test-dates（缓存）');
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0].kind, 'search');
+
+  // 页面 appToken 丢失（刷新/登录态轮换）时，缓存不能直接复用，必须重拉考期。
+  calls.length = 0;
+  pageHasToken = false;
+  const refreshed = await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK' }, ['62250']);
+  assert.equal(refreshed.status, 'available');
+  assert.equal(refreshed.dateSource, 'upcoming-test-dates', 'missing token forces a fresh dates request');
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].kind, 'upcoming-test-dates');
+  assert.equal(calls[1].kind, 'search');
+  pageHasToken = true;
+
+  // 目标考期不在考期响应里：不猜测 asmtEventId，回退页面。
+  calls.length = 0;
+  page.__satregUpcomingDatesCache = null;
+  const noDate = await engine.queryCentersViaApi(page, { targetDate: '2027-08-28', targetCountryCode: 'HK' }, ['62250']);
+  assert.equal(noDate.status, 'unknown');
+  assert.match(noDate.reason, /未返回目标日期/);
+  assert.equal(calls.length, 1, 'no search request when no matching date');
+});
+
+test('api query: captured upcoming dates request is reused and never exposes appToken', async () => {
+  const engine = loadEngine();
+  const page = new EventEmitter();
+  const context = new EventEmitter();
+  page.context = () => context;
+  page.url = () => 'https://satreg.collegeboard.org/register/testCenterSearch';
+  const stop = engine.watchAdmins(page, () => {});
+  const request = new EventEmitter();
+  request.method = () => 'POST';
+  request.url = () => 'https://satreg-api.collegeboard.org/msregrequest-prod/student/upcoming-test-dates';
+  request.postDataJSON = () => ({ isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false, appToken: 'drop-me' });
+  page.emit('request', request);
+  assert.deepEqual(page.__satregUpcomingDatesTemplate,
+    { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: false });
+  assert.equal(page.__satregUpcomingDatesTemplate.appToken, undefined);
+  assert.equal(page.__satregUpcomingDatesUrl, 'https://satreg-api.collegeboard.org/msregrequest-prod/student/upcoming-test-dates');
+
+  const sent = [];
+  page.evaluate = async (fn, options) => {
+    if (!options) return true;
+    sent.push(options);
+    if (options.kind === 'upcoming-test-dates') {
+      return { ok: true, status: 200, data: { dates: [{ testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99 }] } };
+    }
+    return { ok: true, status: 200, data: { testCenters: [{ tcCd: '62250', tcName: 'Zone A', admins: [{ seatAvailable: false, tcAdminStatus: 'Open' }] }] } };
+  };
+  const result = await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK' }, ['62250']);
+  assert.equal(result.status, 'unavailable', JSON.stringify(result));
+  assert.equal(sent[0].url, page.__satregUpcomingDatesUrl);
+  assert.equal(sent[0].body.appToken, undefined, 'appToken must stay in the page, not the cross-process body');
+  assert.equal(sent[1].body.appToken, undefined);
+  assert(!JSON.stringify(result).includes('appToken'));
+  stop();
+});
+
+test('api query: ssdOptIn falls back to captured or task setting when the date payload omits it', async () => {
+  const run = async (taskSsd, dateSsd) => {
+    const engine = loadEngine();
+    const page = new EventEmitter();
+    page.url = () => 'https://satreg.collegeboard.org/register/testCenterSearch';
+    page.__satregUpcomingDatesTemplate = { isUSDomesticInd: 'N', asmtFamilyCd: 1, asmtSubtypeCd: 2, ssdOptIn: true };
+    const sent = [];
+    page.evaluate = async (fn, options) => {
+      if (!options) return true;
+      sent.push(options);
+      if (options.kind === 'upcoming-test-dates') {
+        const item = { testDate: '2026-12-05', status: 'Y', asmtEventId: 301, asmtId: 99 };
+        if (dateSsd !== undefined) item.ssdOptIn = dateSsd;
+        return { ok: true, status: 200, dates: [item], data: { dates: [item] } };
+      }
+      return { ok: true, status: 200, data: { testCenters: [
+        { tcCd: '62250', tcName: 'Zone A', admins: [{ seatAvailable: false, tcAdminStatus: 'Open' }] }
+      ] } };
+    };
+    await engine.queryCentersViaApi(page, { targetDate: '2026-12-05', targetCountryCode: 'HK', ssdOptIn: taskSsd }, ['62250']);
+    return sent;
+  };
+
+  // 考期响应没有 ssdOptIn：沿用捕获到的考期请求（true），不能被默认 false 覆盖。
+  const omitted = await run(false, undefined);
+  assert.equal(omitted[0].body.ssdOptIn, true, 'dates request keeps captured ssdOptIn');
+  assert.equal(omitted[1].body.ssdOptIn, true, 'search request keeps captured ssdOptIn');
+  // 考期响应显式给出 false：以响应为准。
+  const explicit = await run(true, false);
+  assert.equal(explicit[1].body.ssdOptIn, false, 'explicit date payload wins');
+});
+
+test('api poll state: available always needs page confirmation, unavailable is trusted after one cross-check', () => {
+  const engine = loadEngine();
+  // decidePollAction 来自 vm 沙箱，返回对象原型不同，逐字段比较。
+  const decide = (apiResult, state) => {
+    const value = engine.decidePollAction(apiResult, state);
+    return value.action + '|' + value.unavailableChecks;
+  };
+  assert.equal(decide({ status: 'available' }, { unavailableChecks: 0, unavailableTrusted: false }),
+    'confirm-available|0');
+  assert.equal(decide({ status: 'unknown', reason: 'x' }, { unavailableChecks: 7, unavailableTrusted: true }),
+    'page-query|7');
+  assert.equal(decide({ status: 'unavailable' }, { unavailableChecks: 0, unavailableTrusted: false }),
+    'verify-unavailable|1');
+  assert.equal(decide({ status: 'unavailable' }, { unavailableChecks: 1, unavailableTrusted: false }),
+    'verify-unavailable|2');
+  assert.equal(decide({ status: 'unavailable' }, { unavailableChecks: 2, unavailableTrusted: true }),
+    'accept-unavailable|3');
+  assert.equal(decide({ status: 'unavailable' }, { unavailableChecks: 29, unavailableTrusted: true }),
+    'verify-unavailable|30', 'every 30th no-seat result is cross-checked');
+  assert.equal(decide({ status: 'unavailable' }, { unavailableChecks: 30, unavailableTrusted: true }),
+    'accept-unavailable|31');
+});
+
+// 轮询级回归：纯接口轮次不碰页面准备，只有首次无位复核才执行一次页面查位。
+test('api poll worker: pure API rounds skip page preparation and only cross-check no-seat once', async () => {
+  const context = new EventEmitter();
+  let regionSelectCalls = 0;
+  let pageQueries = 0;
+  let apiQueries = 0;
+  const regionSelect = {
+    selectOption: async () => {}, inputValue: async () => 'HK', click: async () => {},
+    isVisible: async () => true, isEnabled: async () => true, count: async () => 1, first() { return this; }
+  };
+  const blank = {
+    first() { return this; }, last() { return this; }, filter() { return this; }, or() { return this; },
+    nth() { return this; }, isVisible: async () => false, isEnabled: async () => false, count: async () => 0,
+    waitFor: async () => {}, innerText: async () => '', evaluate: async () => null, evaluateAll: async () => [],
+    getAttribute: async () => null, click: async () => {}
+  };
+  let closed = false;
+  const page = {
+    setDefaultTimeout() {}, route: async () => {}, goto: async () => {}, waitForTimeout: async () => {},
+    waitForSelector: async () => null, waitForURL: async () => {}, waitForFunction: async () => null,
+    waitForLoadState: async () => {}, isClosed: () => closed,
+    locator: () => blank, getByText: () => blank, getByRole: () => blank,
+    $: async selector => {
+      if (/select\[name\*="country"\]/.test(selector)) { regionSelectCalls += 1; return regionSelect; }
+      return null;
+    },
+    evaluate: async () => null, on() {}, off() {}, context: () => context,
+    url: () => 'https://satreg.collegeboard.org/register/testCenterSearch'
+  };
+  context.newPage = async () => page;
+  context.close = async () => { closed = true; context.emit('close'); };
+  const engine = loadEngine({ launchPersistentContext: async () => context }, undefined,
+    async () => { pageQueries += 1; return { status: 'unavailable', reason: '' }; },
+    async () => { apiQueries += 1; return { status: 'unavailable', reason: '', centerCount: 1 }; },
+    { setTimeout: (fn) => setTimeout(fn, 0) });
+  let polls = 0;
+  let stopWorker;
+  let exited;
+  const done = new Promise(resolve => { exited = resolve; });
+  const worker = engine.runTaskWorker({
+    task: { id: 'poll-fixture', targetDate: '2026-12-05', targetCountryCode: 'HK', targetRegion: 'Hong Kong', targetCenters: ['62250'] },
+    onLog() {}, onPoll() { polls += 1; if (polls >= 3) setTimeout(() => stopWorker(), 0); },
+    onNeedsAction() {}, onError: error => assert.fail(error), onExit: exited
+  });
+  stopWorker = worker.stop;
+  await done;
+  assert.equal(apiQueries, 3, 'every poll asks the read-only API');
+  assert.equal(pageQueries, 1, 'no-seat result is cross-checked once, then trusted');
+  assert.equal(regionSelectCalls, 1, 'pure API rounds must not run page preparation');
 });

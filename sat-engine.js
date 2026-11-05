@@ -121,21 +121,32 @@ function watchTestCenterAdmins(page, onLog) {
   };
   page.context().on('response', handler);
 
-  // 顺带截获官网自己发出的查位 POST 请求体（含考期 asmtEventId 与会话级 appToken），
+  // 顺带截获官网自己发出的查位/考期 POST 请求体（含考期 asmtEventId 与会话级 appToken），
   // 后续只读接口查位就复用这份模板，不再每次点页面。模板只留在页面对象内存里，不打印、不落盘。
   const captureRequest = request => {
     try {
       if (request.method() !== 'POST') return;
-      if (!/search-test-center-admins/.test(request.url())) return;
+      const url = request.url();
       const postData = typeof request.postDataJSON === 'function' ? request.postDataJSON() : null;
-      const template = satregApi.pickSearchTemplate(postData);
-      if (template) {
-        page.__satregSearchTemplate = template;
-        // 端点以官网真实请求为准：资源里的常量带分号等细节，不能靠猜。
-        try {
-          const parsed = new URL(request.url());
-          page.__satregSearchUrl = parsed.origin + parsed.pathname;
-        } catch (e) { /* 保持默认端点 */ }
+      if (/search-test-center-admins/.test(url)) {
+        const template = satregApi.pickSearchTemplate(postData);
+        if (template) {
+          page.__satregSearchTemplate = template;
+          // 端点以官网真实请求为准：资源里的常量带分号等细节，不能靠猜。
+          try {
+            const parsed = new URL(url);
+            page.__satregSearchUrl = parsed.origin + parsed.pathname;
+          } catch (e) { /* 保持默认端点 */ }
+        }
+      } else if (/upcoming-test-dates/.test(url)) {
+        const template = satregApi.pickUpcomingDatesTemplate(postData);
+        if (template) {
+          page.__satregUpcomingDatesTemplate = template;
+          try {
+            const parsed = new URL(url);
+            page.__satregUpcomingDatesUrl = parsed.origin + parsed.pathname;
+          } catch (e) { /* 保持默认端点 */ }
+        }
       }
     } catch (e) {}
   };
@@ -270,8 +281,83 @@ async function queryTestCenters(page, targets, timeout = 15000, onLog = () => {}
   return last;
 }
 
-// 用官网原生查位请求模板，在已登录页面内重放 search-test-center-admins。
-// 只做只读查位；选座/提交/付款仍全部走页面与人工，绝不接管写接口。
+// 考期响应可以短期复用：同一地区/SSD 条件下，官网不会每秒换一份考期。
+// 只缓存响应里已裁剪过的考期字段，不含 appToken。
+const UPCOMING_DATES_TTL_MS = 5 * 60 * 1000;
+
+function testDateBodyOptions(task, captured) {
+  const job = task || {};
+  return {
+    countryCode: job.targetCountryCode,
+    asmtFamilyCd: captured && captured.asmtFamilyCd,
+    asmtSubtypeCd: captured && captured.asmtSubtypeCd,
+    ssdOptIn: captured ? captured.ssdOptIn === true : job.ssdOptIn === true
+  };
+}
+
+async function fetchUpcomingDates(page, task, timeout) {
+  const job = task || {};
+  const country = String(job.targetCountryCode || '').trim().toUpperCase();
+  const captured = page && page.__satregUpcomingDatesTemplate;
+  const ssdOptIn = captured ? captured.ssdOptIn === true : job.ssdOptIn === true;
+  const key = country + '|' + (ssdOptIn ? '1' : '0');
+  const cache = page && page.__satregUpcomingDatesCache;
+  // 命中缓存前先确认页面仍持有 appToken：页面刷新或登录态轮换后令牌可能已丢，
+  // 这时必须重拉考期接口拿新令牌，不能拿旧缓存去发不带令牌的查位请求。
+  if (cache && cache.key === key && Date.now() - cache.at < UPCOMING_DATES_TTL_MS &&
+      await satregApi.hasPageAppToken(page)) {
+    return { ok: true, dates: cache.dates, cached: true, authMode: cache.authMode || '', durationMs: 0 };
+  }
+
+  const body = satregApi.buildUpcomingDatesBody(testDateBodyOptions(job, captured));
+  if (!body) return { ok: false, error: '任务缺少有效地区代码' };
+
+  let response;
+  try {
+    response = await satregApi.upcomingTestDates(page, {
+      body,
+      url: page.__satregUpcomingDatesUrl || undefined,
+      timeoutMs: timeout
+    });
+  } catch (error) {
+    return { ok: false, error: '考期接口异常：' + String((error && error.message) || error).split('\n')[0] };
+  }
+  if (!response || !response.ok) {
+    const status = response && response.status ? response.status : '-';
+    const detail = response && response.error ? '，' + response.error : '';
+    return { ok: false, error: '考期接口未成功（HTTP ' + status + detail + '）' };
+  }
+
+  const dates = Array.isArray(response.dates) ? response.dates : [];
+  try {
+    page.__satregUpcomingDatesCache = { key, at: Date.now(), dates, authMode: response.authMode || '' };
+  } catch (e) {}
+  return {
+    ok: true,
+    dates,
+    cached: false,
+    authMode: response.authMode || '',
+    durationMs: response.durationMs
+  };
+}
+
+// 依据接口查位结论决定本轮动作，保证状态机可单测且不依赖页面：
+// - available  -> confirm-available：必须回页面取得真实选座按钮，接口本身不锁位
+// - unavailable-> verify-unavailable（首次/每 30 次复核）或 accept-unavailable（直接采信）
+// - 其余（unknown/异常）-> page-query：接口不可信，回退页面查位
+function decidePollAction(apiResult, state) {
+  const status = apiResult && apiResult.status;
+  const previous = Number(state && state.unavailableChecks) || 0;
+  const unavailableChecks = previous + (status === 'unavailable' ? 1 : 0);
+  if (status === 'available') return { action: 'confirm-available', unavailableChecks };
+  if (status !== 'unavailable') return { action: 'page-query', unavailableChecks };
+  const trusted = !!(state && state.unavailableTrusted);
+  const needVerify = !trusted || unavailableChecks % 30 === 0;
+  return { action: needVerify ? 'verify-unavailable' : 'accept-unavailable', unavailableChecks };
+}
+
+// 查位优先复用官网原生请求；没有模板（或模板考期对不上）时，按「考期接口 → 查位接口」
+// 两步现取 asmtEventId。只做只读请求；选座/提交/付款仍全部走页面与人工。
 async function queryTestCentersViaApi(page, task, targets, timeout = 10000) {
   let currentUrl = '';
   try { currentUrl = page.url(); } catch (e) {}
@@ -279,15 +365,44 @@ async function queryTestCentersViaApi(page, task, targets, timeout = 10000) {
     return { status: 'unknown', reason: '当前页面不在报名官网域，跳过接口查位' };
   }
 
+  const job = task || {};
   const template = page && page.__satregSearchTemplate;
-  const body = satregApi.buildReplayBody(template, task || {});
+  let body = satregApi.buildReplayBody(template, job);
+  let dateSource = 'captured-template';
+  let picked = null;
+  let effectiveSsdOptIn = job.ssdOptIn === true;
+
   if (!body) {
-    return {
-      status: 'unknown',
-      reason: template
-        ? '捕获的查位请求与当前考期/地区不一致'
-        : '尚未捕获官网查位请求（首轮会先走页面查位）'
-    };
+    const dates = await fetchUpcomingDates(page, job, timeout);
+    if (!dates.ok) {
+      return { status: 'unknown', error: true, reason: dates.error };
+    }
+    picked = satregApi.pickTestDateOption({ dates: dates.dates }, job.targetDate);
+    if (!picked) {
+      // 目标考期还没放出时不能把「没有」缓存 5 分钟，下一轮必须重新问一次。
+      try { page.__satregUpcomingDatesCache = null; } catch (e) {}
+      return {
+        status: 'unknown',
+        reason: '考期接口未返回目标日期 ' + (job.targetDate || '?') + ' 的可报名场次'
+      };
+    }
+    const captured = page.__satregUpcomingDatesTemplate;
+    // 考期条目若自带 ssdOptIn 就以它为准；否则沿用捕获到的考期请求或任务设置。
+    effectiveSsdOptIn = picked.option && typeof picked.option.ssdOptIn === 'boolean'
+      ? picked.option.ssdOptIn
+      : captured ? captured.ssdOptIn === true : job.ssdOptIn === true;
+    body = satregApi.buildSearchBody({
+      eventStartDt: picked.date,
+      countryCode: job.targetCountryCode,
+      asmtEventId: picked.asmtEventId,
+      asmtId: picked.asmtId,
+      ssdOptIn: effectiveSsdOptIn,
+      srcAppId: template && template.srcAppId
+    });
+    dateSource = dates.cached ? 'upcoming-test-dates（缓存）' : 'upcoming-test-dates';
+    if (!body) {
+      return { status: 'unknown', error: true, reason: '无法用考期结果构造查位请求体' };
+    }
   }
 
   let response;
@@ -316,12 +431,17 @@ async function queryTestCentersViaApi(page, task, targets, timeout = 10000) {
     return { status: 'unknown', error: true, reason: '接口响应格式未识别（没有考点列表）' };
   }
 
-  const result = satregApi.matchAvailability(list, targets);
+  const result = satregApi.matchAvailability(list, targets, { targetDate: job.targetDate });
   result.source = 'api';
+  result.dateSource = dateSource;
   result.signed = !!response.signed;
   result.authMode = response.authMode || '';
   result.durationMs = response.durationMs;
   result.centerCount = response.centerCount;
+  if (picked) {
+    result.asmtEventId = picked.asmtEventId;
+    result.dateMatch = picked.match;
+  }
   return result;
 }
 
@@ -513,10 +633,104 @@ async function solveHCaptchaOnce(page, onLog = () => {}) {
 
   const injected = await injectHCaptchaToken(page, token);
   onLog(`hCaptcha 令牌已回填（${injected}），等待页面放行...`);
-  const released = await page.waitForFunction(hCaptchaReleased, null, { timeout: 15000 }).then(() => true, () => false);
-  return released
-    ? { solved: true, detail: 'hCaptcha 官网控件已完成验证，确认按钮已放行' }
-    : { solved: false, detail: '令牌已回填，但官网验证码控件未确认完成，请人工验证' };
+
+  // 若已弹出图片挑战框，不浪费时间等待，直接转入图像识别点击；无弹窗时最多等 4 秒
+  const hasChallenge = await page.evaluate(() => {
+    return [...document.querySelectorAll('iframe[src*="frame=challenge"]')]
+      .some(el => el.getClientRects().length && getComputedStyle(el).visibility !== 'hidden');
+  }).catch(() => false);
+
+  const released = hasChallenge
+    ? false
+    : await page.waitForFunction(hCaptchaReleased, null, { timeout: 4000 }).then(() => true, () => false);
+
+  if (released) {
+    return { solved: true, detail: 'hCaptcha 官网控件已完成验证，确认按钮已放行' };
+  }
+
+  // 方案 1：检测到未放行的图片弹窗，启动 YesCaptcha 图像识别与自动模拟点击
+  onLog('检测到验证码图片弹窗挑战，启动自动识别点击...');
+  const challengePassed = await solveHCaptchaChallenge(page, clientKey, onLog);
+  if (challengePassed) {
+    return { solved: true, detail: 'hCaptcha 弹窗挑战已自动识别并点击通过' };
+  }
+
+  return { solved: false, detail: '令牌已回填，但官网验证码控件未确认完成，请人工验证' };
+}
+
+// 识别 hCaptcha 挑战 iframe 中的题目并自动点击目标图片
+async function solveHCaptchaChallenge(page, clientKey, onLog = () => {}) {
+  try {
+    if (!page || typeof page.frames !== 'function') return false;
+    const getChallengeFrame = () => {
+      const frames = page.frames();
+      return frames.find(f => /hcaptcha\.com.*frame=challenge/.test(f.url()));
+    };
+
+    let frame = getChallengeFrame();
+    if (!frame) return false;
+
+    for (let round = 1; round <= 3; round++) {
+      if (await page.evaluate(hCaptchaReleased).catch(() => false)) return true;
+      frame = getChallengeFrame();
+      if (!frame) return true;
+
+      const promptEl = frame.locator('.prompt-text, h2.prompt-text').first();
+      if (!await promptEl.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) {
+        break;
+      }
+      const question = (await promptEl.innerText()).trim();
+      if (!question) break;
+
+      onLog(`[hCaptcha 自动过码] 第 ${round} 轮题目: "${question}"`);
+      const cells = frame.locator('.task-image, .task-cell, [class*="task-image"]');
+      const count = await cells.count();
+      if (count === 0) break;
+
+      const queries = [];
+      for (let i = 0; i < count; i++) {
+        const buf = await cells.nth(i).screenshot({ type: 'jpeg', quality: 80 });
+        queries.push(buf.toString('base64'));
+      }
+
+      let objects = [];
+      try {
+        objects = await captchaSolver.classifyHCaptcha({ clientKey, question, queries });
+      } catch (err) {
+        onLog(`[hCaptcha 自动过码] 识别服务异常: ${err.message}`);
+        break;
+      }
+
+      if (!Array.isArray(objects) || objects.length === 0) {
+        onLog(`[hCaptcha 自动过码] 未返回有效分类结果`);
+        break;
+      }
+
+      let clickedCount = 0;
+      for (let i = 0; i < objects.length && i < count; i++) {
+        if (objects[i]) {
+          await cells.nth(i).click({ delay: 50, timeout: 3000 }).catch(() => {});
+          clickedCount++;
+        }
+      }
+      onLog(clickedCount > 0
+        ? `[hCaptcha 自动过码] 已自动点击 ${clickedCount} 个目标方格`
+        : `[hCaptcha 自动过码] 当前格无符合目标，点击跳过 (Skip)`);
+
+      const submitBtn = frame.locator('.button-submit, [class*="button-submit"]').first();
+      if (await submitBtn.isVisible().catch(() => false)) {
+        await submitBtn.click({ timeout: 3000 }).catch(() => {});
+      }
+
+      await page.waitForTimeout(2500);
+      if (await page.evaluate(hCaptchaReleased).catch(() => false)) return true;
+    }
+
+    return await page.evaluate(hCaptchaReleased).catch(() => false);
+  } catch (err) {
+    onLog(`[hCaptcha 自动过码] 自动点击流程异常: ${err.message}`);
+    return false;
+  }
 }
 
 // 核心抢位 Worker
@@ -797,6 +1011,7 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
       let apiUnavailableChecks = 0;
       let apiUnavailableTrusted = false;
       let apiDisabledReason = '';
+      let lastApiUnknownReason = ''; // 同一失败原因只播报一次，避免 6 秒一轮刷屏
       let apiModeLogged = false; // 接口通道只播报一次，避免每轮刷屏
       // 页面准备只做 DOM 推进：URL 校正、验证码、报名向导、地区下拉。
       // 接口查位已确认的轮次完全跳过它，避免每轮重复点击与重绘。
@@ -848,17 +1063,27 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
           // 不必每次都点「Find a Test Center」等卡片重绘。页面仍负责交叉验证与真正的选座。
           const targets = task.targetCenters || [];
           const apiResult = apiDisabledReason
-            ? { status: 'unknown', reason: '接口查位已停用（' + apiDisabledReason + '）' }
+            ? { status: 'unknown', reason: '接口查位已停用（' + apiDisabledReason + '）', disabled: true }
             : await queryTestCentersViaApi(page, task, targets);
           let result = apiResult;
+          const decision = decidePollAction(apiResult, {
+            unavailableChecks: apiUnavailableChecks,
+            unavailableTrusted: apiUnavailableTrusted
+          });
+          apiUnavailableChecks = decision.unavailableChecks;
 
-          if (apiResult.status === 'unknown') {
-            onLog('接口查位未确认（' + (apiResult.reason || '未知原因') + '），准备页面并改用页面查位...');
+          if (decision.action === 'page-query') {
+            // 接口停用后页面就是唯一通道；同一失败原因也只播报一次，避免每轮刷屏。
+            const apiReason = apiResult.reason || '未知原因';
+            if (!apiResult.disabled && apiReason !== lastApiUnknownReason) {
+              onLog('接口查位未确认（' + apiReason + '），准备页面并改用页面查位...');
+            }
+            lastApiUnknownReason = apiReason;
             await preparePageQuery();
             queriedPage = true;
             result = await queryTestCenters(page, targets, undefined, onLog);
             querySource = apiDisabledReason ? '页面查位（接口已停用）' : '页面查位';
-          } else if (apiResult.status === 'available') {
+          } else if (decision.action === 'confirm-available') {
             // 接口只当“预警”：真要点选座按钮，仍要页面卡片在眼前，避免误锁或点到过期按钮。
             onLog('接口查位报告【' + apiResult.matchedCenter + '】有可售名额，正在准备页面并刷新卡片以取得选座按钮...');
             await preparePageQuery();
@@ -878,36 +1103,34 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
               };
               querySource = '接口有位/页面未确认';
             }
-          } else if (apiResult.status === 'unavailable') {
-            apiUnavailableChecks += 1;
+          } else if (decision.action === 'verify-unavailable') {
             // 首次无位结论用页面复核一次；之后先信任接口，仅每 30 次抽查一次，
             // 既省掉大量页面点击，又能在接口口径变化时及时发现。
-            const needVerify = !apiUnavailableTrusted || apiUnavailableChecks % 30 === 0;
-            if (needVerify) {
-              onLog('接口查位报告无位，正在准备页面并交叉验证一次...');
-              await preparePageQuery();
-              queriedPage = true;
-              const domResult = await queryTestCenters(page, targets, undefined, onLog);
-              if (domResult.status === 'available') {
-                onLog('⚠️ 接口报告无位但页面显示有位；本轮采信页面结果，并停用接口查位以免继续漏报。');
-                apiDisabledReason = '接口与页面结果矛盾';
-                result = domResult;
-                querySource = '页面查位（接口已停用）';
-              } else if (domResult.status === 'unavailable') {
-                apiUnavailableTrusted = true;
-                querySource = '接口查位（已与页面交叉验证）';
-              } else {
-                querySource = '接口查位（页面未确认）';
-              }
+            onLog('接口查位报告无位，正在准备页面并交叉验证一次...');
+            await preparePageQuery();
+            queriedPage = true;
+            const domResult = await queryTestCenters(page, targets, undefined, onLog);
+            if (domResult.status === 'available') {
+              onLog('⚠️ 接口报告无位但页面显示有位；本轮采信页面结果，并停用接口查位以免继续漏报。');
+              apiDisabledReason = '接口与页面结果矛盾';
+              result = domResult;
+              querySource = '页面查位（接口已停用）';
+            } else if (domResult.status === 'unavailable') {
+              apiUnavailableTrusted = true;
+              querySource = '接口查位（已与页面交叉验证）';
             } else {
-              querySource = '接口查位（无位）';
+              querySource = '接口查位（页面未确认）';
             }
+          } else {
+            querySource = '接口查位（无位）';
           }
 
+          if (apiResult.status !== 'unknown') lastApiUnknownReason = '';
           if (!apiDisabledReason && !apiModeLogged && apiResult.status !== 'unknown') {
             apiModeLogged = true;
             onLog('接口查位通道已启用（' +
               (apiResult.authMode === 'sigv4' ? 'Catapult + SigV4' : 'Catapult 头') +
+              (apiResult.dateSource ? '，考期来源 ' + apiResult.dateSource : '') +
               '，耗时 ' + (apiResult.durationMs || '-') + 'ms，本轮考点 ' +
               (apiResult.centerCount == null ? '-' : apiResult.centerCount) + ' 个）。');
           }
@@ -1883,6 +2106,7 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
 module.exports = {
   runTaskWorker,
   queryTestCentersViaApi,
+  decidePollAction,
   sendPushplus,
   getActivePage: () => activeDebugPage
 };
