@@ -687,6 +687,20 @@ test('official wizard resumes only the target registration and hands rules to th
   });
 });
 
+test('official wizard detects confirmed registration and enters change registration flow', async t => {
+  const browser = await chromium.launch({ headless: true });
+  t.after(() => browser.close());
+  const page = await browser.newPage();
+  const engine = loadEngine();
+  await page.route('https://mysat.collegeboard.org/**', route => route.fulfill({contentType:'text/html', body:`
+    <a href="https://satreg.collegeboard.org/new">Register for the SAT</a>
+    <section><h2>December 5, 2026</h2><p>Confirmed</p><a href="https://satreg.collegeboard.org/register/testCenterSearch">Change Registration</a></section>`}));
+  await page.route('https://satreg.collegeboard.org/**', route => route.fulfill({contentType:'text/html', body:'<h1>Choose your test location</h1>'}));
+  await page.goto('https://mysat.collegeboard.org/dashboard');
+  await engine.wizard(page, () => {}, {targetDate:'2026-12-05'});
+  assert.equal(page.url(), 'https://satreg.collegeboard.org/register/testCenterSearch');
+});
+
 test('wizard click does not time out waiting for a slow destination to load', async t => {
   const browser = await chromium.launch({ headless: true });
   t.after(() => browser.close());

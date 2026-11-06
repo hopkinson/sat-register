@@ -387,7 +387,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
   task.selection = null;
   saveDB(db);
   broadcast('task_updated', task);
-  appendTaskLog(id, '收到启动指令，正在初始化自动化环境...');
+  appendTaskLog(id, '正在启动自动化环境...');
 
   // 动态导入 engine，避免阻塞启动
   try {
@@ -423,7 +423,7 @@ app.post('/api/tasks/:id/start', async (req, res) => {
         runningWorkers.delete(id);
         if (task.status === 'running' || task.status === 'needs_action') {
           task.status = 'idle';
-          appendTaskLog(id, '浏览器任务已结束；请核对官网结果后决定是否重新启动');
+          appendTaskLog(id, '任务已结束，请核对官网结果');
           broadcast('task_updated', task);
         }
       },
@@ -494,7 +494,7 @@ app.post('/api/tasks/:id/complete', async (req, res) => {
   task.lastLog = '✅ 任务已确认完成';
   saveDB(db);
   broadcast('task_updated', task);
-  appendTaskLog(id, '✅ 任务已确认完成，本地浏览器缓存及文件已清理回收');
+  appendTaskLog(id, '✅ 任务已确认完成，本地缓存已清理');
   cleanupTaskFiles(id);
   res.json({ success: true });
 });

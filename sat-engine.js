@@ -803,12 +803,12 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
     const cardInfo = task.cardInfo || settings.cardInfo || null;
 
     if (!account || !password) {
-      onLog('❌ 未检测到 SAT 官网账号或密码，请点击右上角【⚙️ 设置】进行配置！');
+      onLog('❌ 未配置官网账号密码，请在右上角【⚙️ 设置】中添加');
       onError('缺少 SAT 凭证');
       return;
     }
 
-    onLog(`正在启动隔离浏览器实例 (用户目录: profile_${task.id})...`);
+    onLog(`正在启动浏览器 (profile_${task.id})...`);
 
     // 智能检测代理 (仅在显式配置时启用，未配置则使用系统原生网络或 TUN 虚拟网卡)
     let proxyConfig = undefined;
@@ -816,14 +816,14 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
     if (configuredProxy) {
       // shortcut: 选座接口 satreg-api 经 HTTP 代理会一直挂起（直连正常），默认绕过；必须全部走代理的网络用 SAT_PROXY_BYPASS 覆盖。
       proxyConfig = { server: configuredProxy, bypass: process.env.SAT_PROXY_BYPASS || 'satreg-api.collegeboard.org' };
-      onLog(`已自动加载网络代理路由: ${proxyConfig.server}（绕过 ${proxyConfig.bypass}）`);
+      onLog(`已加载代理: ${proxyConfig.server}`);
     } else {
-      onLog('使用系统原生网络 (支持 TUN 虚拟网卡)...');
+      onLog('使用系统原生网络 (TUN)');
     }
 
     // 是否以无头模式运行 (默认 false：弹出真实浏览器窗口，方便桌面直观查看与人工辅助过2FA)
     const isHeadless = false;
-    onLog(`浏览器运行模式: ${isHeadless ? '静默无头 (Headless)' : '桌面弹窗 (Visible)'}`);
+    onLog(`浏览器模式: ${isHeadless ? '静默无头' : '桌面弹窗'}`);
 
     try {
       browserContext = await chromium.launchPersistentContext(profileDir, {
@@ -865,12 +865,12 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
 
       // 登录态会在长时间轮询中失效（官网会话过期或被风控踢出），抽成函数以便轮询时自愈重登。
       async function performLogin() {
-      onLog('正在连接 CollegeBoard 统一登录入口...');
+      onLog('正在连接官网登录入口...');
       const loginUrl = 'https://account.collegeboard.org/login/login';
       try {
         await page.goto(loginUrl, { waitUntil: 'domcontentloaded', timeout: 35000 });
       } catch (gotoErr) {
-        onLog('统一登录入口加载较慢，尝试直通控制台入口...');
+        onLog('登录入口响应慢，尝试直通入口...');
         await page.goto('https://mysat.collegeboard.org/dashboard', { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
       }
 
@@ -895,13 +895,13 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
 
       if (hasIdentifierInput || passwordOnly) {
         if (hasIdentifierInput) {
-          onLog(`正在执行真实登录，账号: ${account}...`);
+          onLog(`正在登录: ${account}...`);
 
           // 1. 输入邮箱账号
           await page.fill('input[name="identifier"]', account);
           const submitEmail = await page.$('input[type="submit"], button[type="submit"]');
           if (submitEmail) await submitEmail.click();
-          onLog('账号已提交，正在等待安全认证方式...');
+          onLog('账号已提交，等待认证...');
 
           // 2. 选择 Password 认证项 (若页面出现多因素选择列表)
           const factorFound = await page.waitForSelector('a[aria-label*="Select Password"], button[aria-label*="Select Password"], .select-factor', { timeout: 8000 }).catch(() => null);
@@ -910,14 +910,14 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
             if (await passwordFactor.isVisible()) await passwordFactor.click();
           }
         } else {
-          onLog('官网已记住账号，直接填入密码...');
+          onLog('账号已记住，正在填入密码...');
         }
 
         // 3. 填入密码
-        onLog('密码认证框已就绪，正在填入密码并登录...');
+        onLog('密码框就绪，正在登录...');
         let passwordInput = await page.waitForSelector('input[type="password"]', { timeout: 10000 }).catch(() => null);
         if (!passwordInput) {
-          await waitForManual('登录需要人工验证，请在浏览器处理；出现密码框或进入 MySAT 后自动继续。',
+          await waitForManual('登录需人工验证，完成后自动继续',
             async () => new URL(page.url()).hostname === 'mysat.collegeboard.org' || await page.locator('input[type="password"]').isVisible());
           passwordInput = await page.$('input[type="password"]');
         }
@@ -928,7 +928,7 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
         }
 
       // 4. 等待 SSO 完成并跳转回 MySAT 控制台
-        onLog('凭据已提交，等待单点登录跳转 (SSO)...');
+        onLog('凭据已提交，等待单点登录跳转...');
         // 不能过早强跳 mysat：会打断进行中的 SSO，直接落到未登录的 Sign In 卡片。
         const ssoDone = await page.waitForURL(u => !u.hostname.startsWith('account.collegeboard.org'), { timeout: 35000 })
           .then(() => true, () => false);
@@ -940,7 +940,7 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
               .filter(t => t && t.length < 200 && /error|incorrect|invalid|wrong|again|verif|captcha|human|locked/i.test(t));
             return text.slice(0, 3).join(' | ') || '无错误提示文本';
           }).catch(() => '读取失败');
-          onLog(`登录仍未跳出登录页：${hint}（当前 ${page.url().slice(0, 90)}）`);
+          onLog(`登录未跳出登录页：${hint}`);
         } else {
           onLog(`SSO 已跳转，当前页 ${new URL(page.url()).hostname}`);
         }
@@ -951,11 +951,11 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
         }
         await page.waitForTimeout(2500);
         if (await page.locator('text=/Sign in to personalize your visit/i').first().isVisible().catch(() => false)) {
-          onLog('⚠️ MySAT 显示未登录卡片：会话未建立，密码提交后没拿到登录态。');
+          onLog('⚠️ 未建立会话，未获取登录态');
         }
-        onLog('登录信息已提交，正在检查官网状态。');
+        onLog('登录已提交，检查状态中...');
       } else {
-        onLog('未出现账号输入框，正在检查官网状态。');
+        onLog('未见账号输入框，检查状态中...');
       }
       }
 
@@ -981,11 +981,11 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
       let lastReloginAt = 0;
       const relogin = async why => {
         if (Date.now() - lastReloginAt < 90000) {
-          onLog('登录态疑似失效（' + why + '），但距上次重登不足 90 秒，本轮跳过自动重登。');
+          onLog(`登录态疑似失效（${why}），90 秒内不重复重登`);
           return false;
         }
         lastReloginAt = Date.now();
-        onLog('检测到登录态失效（' + why + '），正在自动重新登录...');
+        onLog(`登录态失效（${why}），正在重新登录...`);
         await performLogin();
         await checkVerification();
         await handleRegistrationWizardPrerequisites(page, onLog, task, waitForManual);
@@ -1002,7 +1002,7 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
 
       stopWatchingAdmins = watchTestCenterAdmins(page, onLog); // 记录真实余位，并捕获查位请求模板
       const centerDesc = (task.targetCenters && task.targetCenters.length > 0) ? task.targetCenters.join(', ') : '全区任意考点(有位即抢)';
-      onLog(`考位监控引擎启动！目标考点: [${centerDesc}]，开始智能轮询...`);
+      onLog(`监控启动！目标: [${centerDesc}]`);
 
       let lastSuccessfulCheck = null;
       let consecutiveUnknown = 0; // 连续未确认轮数；达到阈值才做一次昂贵的登录态核验
@@ -1053,11 +1053,9 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
 
       // 轮询循环
       while (!isStopped) {
-        let querySource = '页面查位';
         let queriedPage = false;
         try {
           onPoll();
-          onLog(`[第 ${task.pollCount} 次轮询] 正在检索 ${task.targetRegion} 考位...`);
 
           // 查位优先走官网自己的只读接口：它直接返回 admins[0].seatAvailable，
           // 不必每次都点「Find a Test Center」等卡片重绘。页面仍负责交叉验证与真正的选座。
@@ -1082,7 +1080,6 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
             await preparePageQuery();
             queriedPage = true;
             result = await queryTestCenters(page, targets, undefined, onLog);
-            querySource = apiDisabledReason ? '页面查位（接口已停用）' : '页面查位';
           } else if (decision.action === 'confirm-available') {
             // 接口只当“预警”：真要点选座按钮，仍要页面卡片在眼前，避免误锁或点到过期按钮。
             onLog('接口查位报告【' + apiResult.matchedCenter + '】有可售名额，正在准备页面并刷新卡片以取得选座按钮...');
@@ -1091,17 +1088,14 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
             const domResult = await queryTestCenters(page, targets, undefined, onLog);
             if (domResult.status === 'available') {
               result = domResult;
-              querySource = '接口查位 + 页面确认';
             } else if (domResult.status === 'unavailable') {
               onLog('⚠️ 接口报告有位，但页面卡片显示无位；本轮按未知处理，不锁位。');
               result = { status: 'unknown', reason: '接口与页面查位结果矛盾（接口有可售名额）' };
-              querySource = '接口/页面矛盾';
             } else {
               result = {
                 status: 'unknown',
                 reason: '接口报告有位，但页面未确认可选卡片：' + (domResult.reason || '未知')
               };
-              querySource = '接口有位/页面未确认';
             }
           } else if (decision.action === 'verify-unavailable') {
             // 首次无位结论用页面复核一次；之后先信任接口，仅每 30 次抽查一次，
@@ -1114,15 +1108,9 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
               onLog('⚠️ 接口报告无位但页面显示有位；本轮采信页面结果，并停用接口查位以免继续漏报。');
               apiDisabledReason = '接口与页面结果矛盾';
               result = domResult;
-              querySource = '页面查位（接口已停用）';
             } else if (domResult.status === 'unavailable') {
               apiUnavailableTrusted = true;
-              querySource = '接口查位（已与页面交叉验证）';
-            } else {
-              querySource = '接口查位（页面未确认）';
             }
-          } else {
-            querySource = '接口查位（无位）';
           }
 
           if (apiResult.status !== 'unknown') lastApiUnknownReason = '';
@@ -1149,7 +1137,7 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
               continue;
             }
 
-            onLog(`🔥🔥 发现【${matchedCenter}】有空余考位！点击入选并前往确认页...`);
+            onLog(`[第 ${task.pollCount} 次轮询] 🔥🔥 发现【${matchedCenter}】有空余考位！点击入选并前往确认页...`);
             const selection = await attemptSelection(page, selectBtn, { autoSolve: autoSolveCaptcha, log: onLog,
               manual: waitForManual, expectedDate: task.targetDate, expectedCenter: matchedCenter });
             if (isStopped) break;
@@ -1188,25 +1176,25 @@ function runTaskWorker({ task, onLog, onPoll, onNeedsAction, onResume, onError, 
             if (selection.outcome === 'advanced') {
               await handlePostLockProcess(page, onLog, task, photoPath, cardInfo);
             }
-            onLog('浏览器保持开启，请先核对官网选座结果；仅在官网报名和付款成功后点击【确认已付款】。');
+            onLog('请核对官网选座并完成付款，成功后点击【确认已付款】');
             await contextClosed;
             break;
           } else {
-            const seatsText = /^页面查位/.test(querySource)
-              ? '目标考点无位（No seats available.）'
-              : '接口返回无可售名额（seatAvailable 非真）';
-            onLog(result.status === 'unavailable'
-              ? `${querySource}：${seatsText}；查询时间：${checkedAt}`
-              : `当前状态未知（${querySource}）：${result.reason}；上次成功查询：${lastSuccessfulCheck || '暂无'}`);
-              // 连续 3 轮查不到结果时核验一次登录态：SPA 下接口 401 不会改变 URL。
-              if (result.status === 'unknown' && consecutiveUnknown >= 3 && await sessionLost(true)) {
-                consecutiveUnknown = 0;
-                if (await relogin('仪表盘显示未登录')) continue;
-              }
+            const channel = apiDisabledReason ? '页面(接口停用)' : (queriedPage ? '页面' : '接口');
+            if (result.status === 'unavailable') {
+              onLog(`[第 ${task.pollCount} 次轮询] ${task.targetRegion} 暂无可售考位（${channel}）`);
+            } else {
+              onLog(`[第 ${task.pollCount} 次轮询] 状态未确认（${channel}）：${result.reason || '无明确原因'}`);
+            }
+            // 连续 3 轮查不到结果时核验一次登录态：SPA 下接口 401 不会改变 URL。
+            if (result.status === 'unknown' && consecutiveUnknown >= 3 && await sessionLost(true)) {
+              consecutiveUnknown = 0;
+              if (await relogin('仪表盘显示未登录')) continue;
+            }
           }
 
         } catch (pollErr) {
-          onLog(`当前状态未知：${pollErr.message}；上次成功查询：${lastSuccessfulCheck || '暂无'}`);
+          onLog(`[第 ${task.pollCount} 次轮询] 轮询异常：${pollErr.message}`);
           consecutiveUnknown += 1;
           if (consecutiveUnknown >= 3 && await sessionLost(true)) {
             consecutiveUnknown = 0;
@@ -1308,8 +1296,10 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
   const currentUrl = page.url();
   if (currentUrl.includes('mysat.collegeboard.org/dashboard')) {
     const finish = page.getByRole('link', { name: /Finish Registration/i }).or(page.getByRole('button', { name: /Finish Registration/i }));
+    const change = page.getByRole('link', { name: /Change (?:Registration|Test Center|test date or center)/i })
+      .or(page.getByRole('button', { name: /Change (?:Registration|Test Center|test date or center)/i }));
     // 仪表盘 React 挂载慢（实测 30~90s，kiwi 放行后依赖指纹脚本），15s 早退会误判"无法定位报名"。
-    // 轮询等待：Finish Registration 链接可见或页面出现 Incomplete 文案即继续，最多 150s。
+    // 轮询等待：Finish Registration 链接可见、改考链接可见或页面出现 Incomplete 文案即继续，最多 150s。
     {
       const deadline = Date.now() + 150000;
       let ready = false;
@@ -1317,9 +1307,10 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
       while (Date.now() < deadline) {
         const bodyText = await page.locator('body').innerText().catch(() => '');
         const hasFinish = await finish.first().isVisible().catch(() => false);
+        const hasChange = await change.first().isVisible().catch(() => false);
         // 无未完成报名时仪表盘同样算就绪（Register for the SAT 可见即挂载完成）
         const hasRegister = await registerBtnEarly.isVisible().catch(() => false);
-        if (hasFinish || /Incomplete/i.test(bodyText) || hasRegister) {
+        if (hasFinish || hasChange || /Incomplete/i.test(bodyText) || hasRegister) {
           ready = true;
           // 留证：挂载瞬间的完整卡片 DOM（含删除入口），供删除/调试决策。
           try {
@@ -1348,8 +1339,8 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
         }
         await page.waitForTimeout(2000);
       }
-      if (ready) onLog('仪表盘已挂载，未完成报名卡片就绪。');
-      else onLog('仪表盘 150s 内未出现 Finish Registration 卡片，仍尝试诊断一次。');
+      if (ready) onLog('仪表盘已挂载，报名卡片就绪。');
+      else onLog('仪表盘 150s 内未出现报名卡片，仍尝试诊断一次。');
     }
     const matched = await finish.evaluateAll((links, iso) => {
       const date = new Date(iso + 'T00:00:00Z');
@@ -1377,43 +1368,79 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
         await page.goto('https://satreg.collegeboard.org/register/testCenterSearch', { waitUntil: 'domcontentloaded', timeout: 40000 }).catch(() => {});
       }
     } else {
-      const diag = await finish.evaluateAll(links => links.map((l, i) => {
-        let card = l.parentElement, text = '';
-        while (card && card !== document.body) {
-          if (/Incomplete|Finish Registration/i.test(card.innerText)) { text = card.innerText; break; }
-          card = card.parentElement;
-        }
-        return `${i}:${(text || l.innerText || '').replace(/\s+/g, ' ').slice(0, 110)}`;
-      })).catch(() => []);
-      const bodyHint = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
-      onLog(`未完成报名诊断：Finish Registration 按钮 ${diag.length} 个｜${diag.join(' ‖ ') || '无'}｜页面含 Incomplete：${/Incomplete/i.test(bodyHint)}`);
-      // 无未完成报名（如已删除/从零重报）时，从 Register for the SAT 开始全新报名，不转人工。
-      if (!/Incomplete/i.test(bodyHint)) {
-        let started = false;
-        for (let attempt = 1; attempt <= 3 && !started; attempt++) {
-          const registerBtn = page.getByRole('link', { name: /^Register for the SAT/i }).or(page.getByRole('button', { name: /^Register for the SAT/i })).first();
-          if (await registerBtn.isVisible().catch(() => false)) {
-            onLog('未发现未完成报名，正在从 Register for the SAT 开始全新报名...');
-            await clickWizardControl(registerBtn);
-            await page.waitForTimeout(3000);
-            started = true;
-          } else {
-            onLog(`第 ${attempt} 次未见到 Register for the SAT 按钮，刷新仪表盘重试...`);
-            await page.goto('https://mysat.collegeboard.org/dashboard', { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
-            const retryDeadline = Date.now() + 45000;
-            while (Date.now() < retryDeadline) {
-              if (await registerBtn.isVisible().catch(() => false)) break;
-              await page.waitForTimeout(2000);
+      const matchedChange = await change.evaluateAll((links, iso) => {
+        const date = new Date(iso + 'T00:00:00Z');
+        const month = date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
+        const seenCards = new Set();
+        const results = [];
+        for (let i = 0; i < links.length; i++) {
+          let card = links[i].parentElement;
+          while (card && card !== document.body) {
+            const text = card.innerText;
+            const words = text.toLowerCase().match(/[a-z]+|\d+/g) || [];
+            const matches = text.includes(iso) || (words.includes(String(date.getUTCFullYear())) &&
+              words.some(w => /^\d+$/.test(w) && Number(w) === date.getUTCDate()) &&
+              words.some(w => w === month.toLowerCase() || w === month.slice(0, 3).toLowerCase()));
+            if (matches) {
+              if (!seenCards.has(card)) {
+                seenCards.add(card);
+                results.push(i);
+              }
+              break;
             }
+            card = card.parentElement;
           }
         }
-        if (!started) {
-          await manual(`无法唯一定位 ${task.targetDate} 的未完成报名，请在浏览器打开正确报名并进入选日期和考点步骤。`,
+        return results;
+      }, task.targetDate).catch(() => []);
+
+      if (matchedChange.length >= 1) {
+        onLog(`已存在 ${task.targetDate} 报名，进入改考点流程...`);
+        await clickWizardControl(change.nth(matchedChange[0]));
+        const subOption = page.getByRole('link', { name: /Change Test Center/i }).or(page.getByRole('button', { name: /Change Test Center/i })).first();
+        if (await subOption.waitFor({ state: 'visible', timeout: 5000 }).then(() => true, () => false)) {
+          await clickWizardControl(subOption);
+        }
+        await page.waitForURL(url => url.hostname === 'satreg.collegeboard.org', { timeout: 60000 }).catch(() => {});
+      } else {
+        const diag = await finish.evaluateAll(links => links.map((l, i) => {
+          let card = l.parentElement, text = '';
+          while (card && card !== document.body) {
+            if (/Incomplete|Finish Registration/i.test(card.innerText)) { text = card.innerText; break; }
+            card = card.parentElement;
+          }
+          return `${i}:${(text || l.innerText || '').replace(/\s+/g, ' ').slice(0, 110)}`;
+        })).catch(() => []);
+        const bodyHint = (await page.locator('body').innerText().catch(() => '')).replace(/\s+/g, ' ');
+        onLog(`未完成报名诊断：Finish Registration 按钮 ${diag.length} 个｜${diag.join(' ‖ ') || '无'}｜页面含 Incomplete：${/Incomplete/i.test(bodyHint)}`);
+        // 无未完成报名（如已删除/从零重报）时，从 Register for the SAT 开始全新报名，不转人工。
+        if (!/Incomplete/i.test(bodyHint)) {
+          let started = false;
+          for (let attempt = 1; attempt <= 3 && !started; attempt++) {
+            const registerBtn = page.getByRole('link', { name: /^Register for the SAT/i }).or(page.getByRole('button', { name: /^Register for the SAT/i })).first();
+            if (await registerBtn.isVisible().catch(() => false)) {
+              onLog('未发现未完成报名，开始新建报名...');
+              await clickWizardControl(registerBtn);
+              await page.waitForTimeout(3000);
+              started = true;
+            } else {
+              onLog(`未检测到报名入口，刷新重试 (${attempt}/3)...`);
+              await page.goto('https://mysat.collegeboard.org/dashboard', { waitUntil: 'domcontentloaded', timeout: 35000 }).catch(() => {});
+              const retryDeadline = Date.now() + 45000;
+              while (Date.now() < retryDeadline) {
+                if (await registerBtn.isVisible().catch(() => false)) break;
+                await page.waitForTimeout(2000);
+              }
+            }
+          }
+          if (!started) {
+            await manual(`无法唯一定位 ${task.targetDate} 未完成报名，请在浏览器中打开`,
+              async () => new URL(page.url()).hostname === 'satreg.collegeboard.org');
+          }
+        } else {
+          await manual(`无法唯一定位 ${task.targetDate} 未完成报名，请在浏览器中打开`,
             async () => new URL(page.url()).hostname === 'satreg.collegeboard.org');
         }
-      } else {
-        await manual(`无法唯一定位 ${task.targetDate} 的未完成报名，请在浏览器打开正确报名并进入选日期和考点步骤。`,
-          async () => new URL(page.url()).hostname === 'satreg.collegeboard.org');
       }
     }
   }
@@ -1428,7 +1455,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
   // 循环处理 Step 1 of 4: Personal Information / School Info / Student Profile (视频 00:40 - 03:00)
   let guard = 0;
   while (guard++ < 8 && page.url().includes('personalInformation')) {
-    onLog(`[向导 Step 1/4] 正在处理考生个人信息与背景档案 (第 ${guard} 步)...`);
+    onLog(`[向导 1/4] 正在处理考生信息 (第 ${guard} 步)...`);
     
     // 学校、年级和问卷使用官网已有值，不能以选项位置推断考生资料。
     const dialogs = page.locator('[role="dialog"]:visible, [role="alertdialog"]:visible, .cb-modal[aria-hidden="false"]:visible');
@@ -1444,7 +1471,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
     // Confirm 提交的是下拉当前值（账号档案里的年级），与人工确认流程一致。
     const gradeConfirm = page.locator('#qc-id-personalinfo-button-gradeconfirm:visible');
     if (await gradeConfirm.isVisible().catch(() => false)) {
-      onLog('[向导 Step 1/4] 年级编辑框已展开，自动点击 Confirm 确认档案年级。');
+      onLog('[向导 1/4] 自动确认档案年级');
       try {
         await clickWizardControl(gradeConfirm);
         await page.waitForTimeout(2000);
@@ -1459,7 +1486,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
         .map(el => el.labels?.[0]?.innerText?.trim() || el.getAttribute('aria-label') || el.name || el.id || '未填写字段'));
     const missing = await invalidFields();
     if (missing.length) {
-      await manual(`个人信息有待核对或补全的字段：${missing.join('、')}。请按真实资料填写，系统保留已有答案。`,
+      await manual(`考生信息待补全（${missing.join('、')}），请在浏览器中填写`,
         async () => outsidePersonalInfo() || (await invalidFields()).length === 0);
       continue;
     }
@@ -1469,7 +1496,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
     const wizardGetStarted = page.locator('#qc-id-getstarted-button-getstarted:visible')
       .or(page.locator('button:visible:has-text("Get Started")')).first();
     if (await wizardGetStarted.isVisible().catch(() => false)) {
-      onLog('[向导 Step 1/4] 检测到 Get Started 过渡页，自动点击进入表单。');
+      onLog('[向导 1/4] 进入信息表单');
       try {
         await clickWizardControl(wizardGetStarted);
         await page.waitForTimeout(2500);
@@ -1568,7 +1595,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
         visible: el.getClientRects().length > 0
       }))).catch(() => []);
       onLog(`[Step 1 诊断] 当前页 ${page.url().split('?')[0]} 候选继续控件：${JSON.stringify(candidates)}`);
-      await manual('个人信息页尚不能继续，请核对页面提示并完成资料确认。',
+      await manual('个人信息页尚不能继续，请在浏览器核对资料',
         async () => outsidePersonalInfo() || (await dialogs.count()) > 0 || await signature() !== before);
       continue;
     }
@@ -1580,7 +1607,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
       onLog(`个人信息页 Continue 未完成：` + err.message.split("\n")[0]);
       // 点击期间弹出的提示在下一轮统一交接，不重复点击被遮挡的页面。
       if (await dialogs.count()) continue;
-      await manual('个人信息页继续操作未完成，请检查官网提示并继续。',
+      await manual('个人信息页未完成，请在浏览器核对',
         async () => outsidePersonalInfo() || (await dialogs.count()) > 0 || await signature() !== before);
       continue;
     }
@@ -1591,7 +1618,7 @@ async function handleRegistrationWizardPrerequisites(page, onLog, task, manual =
       tracker.stop();
     }
     if (!progressed) {
-      await manual('个人信息页点击 Continue 后未推进，请核对资料及页面提示并手动继续。',
+      await manual('个人信息页未推进，请在浏览器点击继续',
         async () => outsidePersonalInfo() || (await dialogs.count()) > 0 || await signature() !== before);
     }
   }
@@ -1673,7 +1700,7 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
   if (getStarted) {
     await getStarted.click().catch(() => {});
     await page.waitForTimeout(1500);
-    onLog('已点击报名总览的 Get Started，进入规则确认。');
+    onLog('已进入规则确认');
   }
 
   // 0.5 续办可能直接落在旧占位的确认页（20 分钟警告、无查询表单）；先 Back 回考点选择再查位。
@@ -1681,12 +1708,12 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
   if (staleConfirmBack && await staleConfirmBack.isVisible().catch(() => false)) {
     await staleConfirmBack.click().catch(() => {});
     await page.waitForTimeout(1500);
-    onLog('检测到旧考位确认页，已自动返回考点选择表单。');
+    onLog('检测到旧确认页，已返回考点选择');
   }
 
   // 1. 检查并签署 Testing Rules (视频 03:04)
   const rulesGone = async () => !await page.locator('text=/SAT Weekend Testing Rules|Testing Rules/').first().isVisible();
-  const rulesManualMessage = '请在官网阅读考试规则，滚动条款至末尾，由你当次确认接受并点击 Continue；系统等待处理后继续。';
+  const rulesManualMessage = '请在官网阅读规则并由你当次确认，点击 Continue 后继续';
   const rulesText = await page.$('text=/SAT Weekend Testing Rules|Testing Rules/');
   if (rulesText && await rulesText.isVisible()) {
     if (getGlobalSettings().autoAcceptRules) {
@@ -1702,7 +1729,7 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
   // 2. 检查选考期页面 (Choose a test date - 视频 03:28)
   const chooseDateHeader = await page.$('text=Choose a test date');
   if (chooseDateHeader) {
-    onLog('检测到考期选择页面 (Choose a test date)，正在选择目标考期...');
+    onLog(`正在选择考期 ${task.targetDate}...`);
     if (!/^\d{4}-\d{2}-\d{2}$/.test(task.targetDate || '')) throw new Error('请先为任务填写有效考期');
     const target = new Date(`${task.targetDate}T00:00:00Z`);
     if (!Number.isFinite(target.getTime())) throw new Error('任务考期无效');
@@ -1733,9 +1760,7 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
       if (matches) { dateOption = candidate; break; }
     }
     if (!dateOption) {
-      await manual(`无法准确匹配考期 ${task.targetDate}，请在浏览器中人工选择并继续；系统不会替你选择其他日期`,
-        async () => !await page.getByText('Choose a test date', { exact: true }).isVisible());
-      return;
+      throw new Error(`无法准确匹配考期 ${task.targetDate}：官网当前未开放该考期（可能已截止或该考生不满足报考条件），自动终止任务`);
     }
     const label = await dateOption.evaluateHandle(el => el.labels?.[0] || el);
     await label.asElement().click();
@@ -1743,7 +1768,7 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
     if ((await dateOption.getAttribute('id') || '').startsWith('qc-id-selectdatecenter-testdate-button-')) {
       const details = page.getByText(new RegExp(`${month}\\s+${day},?\\s+${year}`, 'i')).first();
       if (!await details.waitFor({ state: 'visible', timeout: 10000 }).then(() => true, () => false)) {
-        await manual(`官网未确认完整考期 ${task.targetDate}，请人工核对日期并继续。`,
+        await manual(`考期未确认 (${task.targetDate})，请在浏览器核对`,
           async () => !await page.getByText('Choose a test date', { exact: true }).isVisible());
         return;
       }
@@ -1756,7 +1781,7 @@ async function ensureOnTestCenterSearchForm(page, onLog, task, manual = async me
     const date = new Date(task.targetDate + 'T00:00:00Z');
     const month = date.toLocaleString('en-US', { month: 'long', timeZone: 'UTC' });
     const expected = page.getByText(new RegExp(`(?:${month}|${month.slice(0, 3)})\\s+${date.getUTCDate()},?\\s+${date.getUTCFullYear()}`, 'i')).first();
-    if (!await expected.isVisible()) await manual(`考点查询页未确认目标考期 ${task.targetDate}，请人工核对并切换到正确考期。`, async () => await expected.isVisible());
+    if (!await expected.isVisible()) await manual(`查询页考期不匹配 (${task.targetDate})，请在浏览器核对`, async () => await expected.isVisible());
   }
 }
 
@@ -1997,7 +2022,7 @@ async function attemptSelection(page, selectBtn, deps = {}) {
 async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
   try {
     // === 步骤 3: 考生证件照上传与合规校验 (视频 06:10 - 07:46) ===
-    onLog('正在等待进入证件照上传页面 (Upload Your Photo)...');
+    onLog('正在等待进入证件照页面...');
     await page.waitForURL(url => url.pathname.includes('photoUpload') || url.pathname.includes('purchase'), { timeout: 20000 }).catch(() => {});
     
     if (page.url().includes('photoUpload')) {
@@ -2006,7 +2031,7 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
 
       const fileInput = await page.waitForSelector('input[type="file"]', { timeout: 8000 }).catch(() => null);
       if (fileInput && photoPath && fs.existsSync(photoPath)) {
-        onLog(`正在推入考生免冠证件照: ${photoPath}...`);
+        onLog('正在上传免冠证件照...');
         await fileInput.setInputFiles(photoPath);
         await page.waitForTimeout(2500);
         // 裁切/合规卡片点击 Continue
@@ -2018,7 +2043,7 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
       // 点击 Next: Check Out 按钮 (视频 07:40)
       const nextCheckoutBtn = await page.waitForSelector('button:has-text("Next: Check Out"), button:has-text("Check Out")', { timeout: 8000 }).catch(() => null);
       if (nextCheckoutBtn) {
-        onLog('证件照已确认，进入结账流程 (Next: Check Out)...');
+        onLog('证件照已确认，进入结账流程...');
         await nextCheckoutBtn.click();
         await page.waitForTimeout(3000);
       }
@@ -2028,7 +2053,7 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
     await page.waitForURL(url => url.pathname.includes('purchase') || url.pathname.includes('checkout') || url.hostname.includes('pps.collegeboard.org'), { timeout: 20000 }).catch(() => {});
 
     if (page.url().includes('purchase') || page.url().includes('checkout')) {
-      onLog('正在处理考试设备确认 (Tell Us Which Device You\'ll Bring)...');
+      onLog('正在确认考试设备...');
       // 选择自带笔记本设备
       const deviceSelect = await page.$('select');
       if (deviceSelect) {
@@ -2038,14 +2063,14 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
       // 签署确认条款勾选框 (视频 08:25 处 [x] I confirm this information is accurate)
       const accurateCheckbox = await page.$('input[type="checkbox"]');
       if (accurateCheckbox) {
-        onLog('签署报考信息真实性声明 (I confirm this information is accurate)...');
+        onLog('签署信息真实性声明...');
         await accurateCheckbox.check().catch(() => {});
       }
 
       // 点击确认进入收银台 (黄色 Confirm 按钮)
       const finalConfirmBtn = await page.$('button:has-text("Confirm")');
       if (finalConfirmBtn) {
-        onLog('确认订单无误，正在进入官方支付网关 (PPS)...');
+        onLog('正在进入官方收银台 (PPS)...');
         await finalConfirmBtn.click();
         await page.waitForTimeout(4000);
       }
@@ -2055,7 +2080,7 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
     await page.waitForURL(url => url.hostname.includes('pps.collegeboard.org'), { timeout: 25000 }).catch(() => {});
 
     if (page.url().includes('pps.collegeboard.org')) {
-      onLog('🎉 已成功抵达 College Board 官方收银台 (pps.collegeboard.org)，准备支付！');
+      onLog('🎉 已抵达官方收银台 (PPS)！');
 
       if (cardInfo && cardInfo.number) {
         // 1. 选择卡种 Type of Card (Visa / MasterCard 等)
@@ -2091,11 +2116,11 @@ async function handlePostLockProcess(page, onLog, task, photoPath, cardInfo) {
           if (cvvInput) await cvvInput.fill(cardInfo.cvv);
         }
 
-        onLog('💳 信用卡表单（卡种、卡号、有效期、CVV）已全自动填报就绪！');
+        onLog('💳 信用卡信息已预填完毕');
 
-        onLog('信用卡信息已尝试填入，请核对考期、考点和金额后人工提交支付；本机版不会自动扣款。');
+        onLog('信用卡已预填，请人工核对并支付（本机不自动扣款）');
       } else {
-        onLog('已到达收银台，未配置信用卡预填。请人工核对锁位结果、金额并付款。');
+        onLog('已到达收银台，未配置信用卡，请人工核对并付款');
       }
     }
   } catch (flowErr) {

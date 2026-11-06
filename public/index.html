@@ -928,11 +928,30 @@
           !r || typeof r.name !== 'string' || !r.name.trim() || !/^[A-Z]{2}$/.test(r.code) || r.code === 'US')) throw new Error('地区数据无效');
         region.innerHTML = '<option value="" disabled selected>请选择国家／地区</option>';
         const regionNames = new Intl.DisplayNames(['zh-CN'], { type: 'region' });
-        for (const r of data.regions) {
-          const option = new Option(`${r.code} ${regionNames.of(r.code)} (${r.name})`, r.code);
-          option.dataset.region = r.name;
-          region.add(option);
+        const POPULAR_CODES = ['MO', 'HK', 'SG', 'TH', 'JP', 'KR', 'MY'];
+        const popularSet = new Set(POPULAR_CODES);
+        const regionMap = new Map(data.regions.map(r => [r.code, r]));
+
+        const buildOption = (r) => {
+          const opt = new Option(`${r.code} ${regionNames.of(r.code)} (${r.name})`, r.code);
+          opt.dataset.region = r.name;
+          return opt;
+        };
+
+        const popularGroup = document.createElement('optgroup');
+        popularGroup.label = '🌟 常用考区';
+        for (const code of POPULAR_CODES) {
+          const r = regionMap.get(code);
+          if (r) popularGroup.appendChild(buildOption(r));
         }
+
+        const otherGroup = document.createElement('optgroup');
+        otherGroup.label = '🌐 其他地区';
+        for (const r of data.regions) {
+          if (!popularSet.has(r.code)) otherGroup.appendChild(buildOption(r));
+        }
+
+        region.append(popularGroup, otherGroup);
         region.disabled = false;
         status.innerText = `获取于 ${new Date(data.fetchedAt).toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false })}`;
       } catch (error) {
